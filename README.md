@@ -11,6 +11,7 @@ We aim to reveal how structural variation is organized within and around haplobl
 - Check if specific haploblocks are prone to particular SV types
 - Check if these SVs correlate with 1000 Genomes population clusters
 - Check if whether any duplications (Maria) and/or inversions (Alistair) stand out
+- Wrap it up in a re-usable and scalable pipeline
 
 
 ## Contributors
