@@ -4,6 +4,8 @@ Ready-to-use prompts for an agentic coding assistant, organized by pipeline stag
 
 Shared context to paste into any session if it doesn't already have it: *"We're building a Python pipeline for a hackathon that studies structural variants (SVs: DEL/DUP/INV/INS) within 'haploblocks' — LD-defined haplotype-hash regions from data.haploblocks.org. SV calls come from dbVar study nstd152 (Chaisson et al. 2019, 1000 Genomes haplotype-resolved SVs). The pipeline is a sequence of independently-runnable, parameterized stages under `pipeline/`, each a script or module taking input paths and config values as CLI args or function args — never hardcoded paths. See README.md for the full stage list and PROMPTS.md for the stage you're implementing."*
 
+This is an example change for Maria to see.
+
 ---
 
 ## Day 1 (Aug 25) — Stages 0–2
