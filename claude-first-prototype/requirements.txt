@@ -1,0 +1,52 @@
+# Stage 0: Data ingestion & harmonization
+requests
+pandas
+numpy
+pyyaml
+cyvcf2
+pyliftover
+
+# Stage 1: QC & normalization
+pysam
+pandas
+
+# Stage 2: SV x haploblock intersection
+numpy
+pandas
+
+# Stage 3: Boundary enrichment test
+numpy
+scipy
+
+# Stage 4: Common vs. population-specific SV classification
+pandas
+numpy
+
+# Stage 5: Per-haploblock SV-type enrichment (Poisson/NB regression, FDR)
+statsmodels
+scipy
+scikit-learn
+
+# Stage 6: Population-cluster correlation
+scipy
+pandas
+
+# Stage 7: SV-based population structure reconstruction (PCA/UMAP, ARI)
+scikit-learn
+umap-learn
+
+# Stage 8: Duplication/inversion gene & selection overlay
+pyranges
+gtfparse
+
+# Stage 9: Integration & report
+matplotlib
+seaborn
+jinja2
+jupyter
+
+# Testing
+pytest
+
+# Non-pip dependencies (see README "Non-pip dependencies"):
+#   bcftools / samtools (CLI, used in Stage 1)

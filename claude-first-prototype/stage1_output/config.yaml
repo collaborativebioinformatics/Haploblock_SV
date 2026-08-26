@@ -1,0 +1,19 @@
+genome_build: GRCh38
+data_sources:
+  sample_metadata: real (inferred from dbVar SAMPLE ids)
+  haploblocks: real
+  sv_calls: real
+thresholds:
+  af_common_threshold: 0.05
+  boundary_distance_bp: 5000
+  min_sv_count_per_block: 3
+  min_sv_length: 50
+  max_sv_length: 5000000
+  drop_imprecise: true
+seeds:
+  permutation_seed: 42
+  umap_seed: 42
+paths:
+  sv_calls: /home/kubicaj/workspace/agentic-bioinformatics/Haploblock_SV/claude-first-prototype/stage1_output/sv_calls.tsv
+  haploblocks: /home/kubicaj/workspace/agentic-bioinformatics/Haploblock_SV/claude-first-prototype/stage1_output/haploblocks.tsv
+  sample_metadata: /home/kubicaj/workspace/agentic-bioinformatics/Haploblock_SV/claude-first-prototype/stage1_output/sample_metadata.tsv
