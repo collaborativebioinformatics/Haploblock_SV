@@ -48,35 +48,38 @@ Stages 6, 7, and 8 depend only on Stages 1/4 respectively and can run in paralle
 
 ## Prototype: Stage 0 (data ingestion)
 
-`pipeline/stage0_ingest.py` is implemented and working — it's the current state of the prototype. **By default it fetches real data**: dbVar's nstd152 call+region VCFs and a (capped) slice of data.haploblocks.org's per-block cluster-hash TSVs. Any source that fails to download or parse falls back to synthetic data for just that input, so later stages are never blocked.
+`pipeline/stage0_ingest.py` is implemented and working — it's the current state of the prototype. **By default it fetches real data, genome-wide**: dbVar's nstd152 call+region VCFs, and haploblock boundaries for all 23 chromosomes (1-22 + X) from data.haploblocks.org. Any source that fails to download or parse falls back to synthetic data for just that input, so later stages are never blocked.
 
 **Setup.** The `pyEnv_SVhack2026` virtualenv (`~/pyenvs/pyEnv_SVhack2026`) already has everything in `requirements.txt` installed. Elsewhere: `pip install -r requirements.txt` (plus `bcftools`/`samtools` for later stages).
 
-**Run command** (no arguments needed — fetches real data by default, ~10-15s):
+**Run command** (no arguments needed — fetches real data genome-wide by default, ~14s):
 ```
 ~/pyenvs/pyEnv_SVhack2026/bin/python pipeline/stage0_ingest.py
 ```
-This writes `example_data/sv_calls.tsv`, `example_data/haploblocks.tsv`, `example_data/sample_metadata.tsv`, and `example_data/config.yaml`, plus the four raw dbVar files (`nstd152.GRCh38.variant_{call,region}.vcf.gz[.tbi]`). Useful flags:
-- `--haploblock-chroms chr21,chr22` (default `chr21` only) and `--haploblock-max-blocks-per-chrom 50` (default) control how much of data.haploblocks.org's tens-of-thousands-of-files tree gets pulled — raise these, or pass `chroms all`, for a fuller run; expect it to be slow (one HTTP request per block file).
+This writes `example_data/sv_calls.tsv`, `example_data/haploblocks.tsv`, `example_data/sample_metadata.tsv`, and `example_data/config.yaml`, plus the four raw dbVar files (`nstd152.GRCh38.variant_{call,region}.vcf.gz[.tbi]`). Haploblock boundaries come from one small per-chromosome file each — `data.haploblocks.org` publishes `<chrom>/<chrom>_haploblock_boundaries_<chrom>.tsv` (one row per block) and usually `<chrom>/<chrom>_haploblock_hashes.tsv` (one representative hash per block) — rather than the thousands of individual per-block `chrN_cluster_hashes_<start>-<end>.tsv` files also present in the same directories, which don't scale to a genome-wide default (one HTTP request per block; an earlier version of this script that used those took 2-3 minutes for a 50-blocks-per-chromosome cap alone). Useful flags:
+- `--haploblock-chroms chr21,chr22` restricts to specific chromosomes instead of the `all` default.
 - `--skip-dbvar-download` / `--skip-haploblock-download` force synthetic data for that input, for fast offline iteration.
 - `--sv-source` / `--haploblock-source` / `--panel-source` point at a single already-prepared local file or URL instead (bypasses the auto-fetchers above).
 
 **Expected output** — log lines naming which of the three inputs are real vs. synthetic and key data-quality warnings, e.g.:
 ```
-INFO: Using real haploblock table (50 blocks) from https://data.haploblocks.org/haploblock_hashes/1000G
+INFO: chr1: fetched 3049 haploblock boundaries
+...
+INFO: chrX: fetched 846 haploblock boundaries
+INFO: Fetched 39113 haploblock boundaries across 23 chromosome(s)
 INFO: dbVar call file: 102153 usable (sample, call) observation(s) across 9 sample(s)
 INFO: Using real SV calls (50601 records) from ... (nstd152)
 WARNING: No --panel-source given: replaced the placeholder synthetic sample panel with 9 sample(s)
   inferred from the real dbVar SV calls (hardcoded HGSVC trio lookup). This covers only
   ['AFR', 'AMR', 'EAS'] -- population-specific classification cannot be evaluated for any
   superpopulation not listed.
-INFO: Wrote 50601 SVs, 50 haploblocks, 9 samples to .../example_data
+INFO: Wrote 50601 SVs, 39113 haploblocks, 9 samples to .../example_data
 ```
 `example_data/config.yaml` is the contract every later stage reads (genome build, AF/boundary thresholds, seeds, and the three table paths) — inspect it to confirm it parses and has all five top-level keys (`genome_build`, `data_sources`, `thresholds`, `seeds`, `paths`).
 
 **Important data-availability caveat, not a bug:** nstd152's `variant_call.vcf.gz` currently covers exactly **9 samples from 3 HGSVC trios** (CHS: HG00512/13/14 → EAS, PUR: HG00731/32/33 → AMR, YRI: NA19238/39/40 → AFR) — no EUR or SAS samples at all. Without a real `--panel-source`, Stage 0 infers population labels for just these 9 via a hardcoded lookup (`HGSVC_TRIO_SUPERPOPULATIONS` in `stage0_ingest.py`). H3/H5/H6's population-level analyses will be severely underpowered on this alone (n=3 per population, 3 of 5 superpopulations represented) — a real IGSR sample panel widens the population *labels* available but does not add more dbVar samples, since nstd152 itself only has calls for these 9 individuals.
 
-**Known limitations, deliberately out of scope for this prototype:** no retry/resume on failed downloads; per-block haploblock TSVs are parsed into summary stats (`n_clusters`, `hash_length`) but not persisted individually, since a genome-wide run touches tens of thousands of them; `cluster_diff_score` (an actual population-differentiation metric) is left as `NaN` for real haploblock data — computing it needs population labels, which belongs in a later stage (Stage 6), not ingestion; genome build is taken from explicit `--*-genome-build`/`--dbvar-build` flags rather than auto-detected from file headers.
+**Known limitations, deliberately out of scope for this prototype:** no retry/resume on failed downloads; `n_clusters` (the number of distinct haplotype clusters in a block) is always `NaN` for real haploblock data since it needs the per-block cluster-enumeration files this script deliberately avoids fetching at genome scale — only `hash_length` (derived from the one representative hash per block) is recovered; `cluster_diff_score` (an actual population-differentiation metric) is left as `NaN` for real haploblock data — computing it needs population labels, which belongs in a later stage (Stage 6), not ingestion; genome build is taken from explicit `--*-genome-build`/`--dbvar-build` flags rather than auto-detected from file headers.
 
 `sv_calls.tsv` also carries `imprecise` (bool) and `length` (float, nullable) columns — dbVar never sets VCF QUAL/FILTER (always `"."` in nstd152), so `imprecise` is the closest thing this source has to a confidence flag, and INS records need `length` because their `end - start` is always ~1bp (an insertion's reference position, not its size); see the "Stage 1" comment block at the top of `stage0_ingest.py` for the full column contract.
 
@@ -105,22 +108,21 @@ INFO: Wrote 36363/50601 SVs and 50 haploblocks to .../stage1_output
 
 ## Prototype: Stage 2 (SV × haploblock intersection)
 
-`pipeline/stage2_intersect.py` is implemented and working — **pure Python/numpy, no bedtools/pybedtools**. Haploblocks are non-overlapping within a chromosome (Stage 1 enforces this, and Stage 2 re-validates it defensively since it's independently runnable), so per chromosome the intersection is a sorted 1D interval search via `numpy.searchsorted` rather than a general-purpose interval-join library — fast (36,363 real SVs against 50 real haploblocks classify in well under a second) and dependency-free.
+`pipeline/stage2_intersect.py` is implemented and working — **pure Python/numpy, no bedtools/pybedtools**. Haploblocks are non-overlapping within a chromosome (Stage 1 enforces this, and Stage 2 re-validates it defensively since it's independently runnable), so per chromosome the intersection is a sorted 1D interval search via `numpy.searchsorted` rather than a general-purpose interval-join library — fast (36,363 real SVs against all 39,113 real genome-wide haploblocks classify in well under a second) and dependency-free.
 
-Each SV gets `position_class` (`within_block` / `boundary_crossing` / `outside_block`) and `haploblock_id` (comma-joined if it touches more than one block). A block only counts as fully "within" when the SV is ≥ N bp (`boundary_distance_bp`) from *both* its edges; real data.haploblocks.org blocks are contiguous (no gaps between neighbors, confirmed on the chr21 data pulled by Stage 0), so being near one block's edge usually means being near its neighbor's edge too — both get listed. See the classification rules spelled out in the module docstring for the exact cases (including the pandas empty-string-becomes-NaN gotcha in the round-tripped TSV, documented there for whoever implements Stage 3/4).
+Each SV gets `position_class` (`within_block` / `boundary_crossing` / `outside_block`) and `haploblock_id` (comma-joined if it touches more than one block). A block only counts as fully "within" when the SV is ≥ N bp (`boundary_distance_bp`) from *both* its edges; real data.haploblocks.org blocks are contiguous (no gaps between neighbors, confirmed genome-wide on the data pulled by Stage 0), so being near one block's edge usually means being near its neighbor's edge too — both get listed. See the classification rules spelled out in the module docstring for the exact cases (including the pandas empty-string-becomes-NaN gotcha in the round-tripped TSV, documented there for whoever implements Stage 3/4).
 
 **Run command** (chains off Stage 1's output):
 ```
 ~/pyenvs/pyEnv_SVhack2026/bin/python pipeline/stage2_intersect.py --config stage1_output/config.yaml --out-dir stage2_output
 ```
 
-**Expected output** on the real chr21 + nstd152 data:
+**Expected output** on the real genome-wide haploblocks + nstd152 data:
 ```
-INFO: Position classification (N=5000bp): within_block=19 boundary_crossing=4 outside_block=36340
-INFO: 3 SV(s) matched more than one haploblock (span a shared edge)
-INFO: Wrote 36363 annotated SVs and 50 haploblocks to .../stage2_output
+INFO: Position classification (N=5000bp): within_block=28068 boundary_crossing=5902 outside_block=2393
+INFO: 5872 SV(s) matched more than one haploblock (span a shared edge)
+INFO: Wrote 36363 annotated SVs and 39113 haploblocks to .../stage2_output
 ```
-(Most SVs are `outside_block` because Stage 0's default fetch only pulls 50 of chr21's ~6,099 haploblocks and every other chromosome has none at all — raise `--haploblock-max-blocks-per-chrom`/`--haploblock-chroms` in Stage 0 for fuller coverage.)
 
 ## Tests
 
