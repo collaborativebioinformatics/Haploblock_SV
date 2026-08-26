@@ -45,9 +45,13 @@ always UCSC-style ("chr1".."chr22", "chrX").
                        (join key, not a fixed/known set of names).
 
   haploblocks.tsv     haploblock_id (str), chrom (str), start (int),
-                       end (int), n_snps (float, often NaN), n_clusters
-                       (float, NaN if a manually-supplied table lacked
-                       one), hash_length (float, often NaN),
+                       end (int), n_snps (float, always NaN -- not published
+                       by data.haploblocks.org's boundary/hash files), n_clusters
+                       (float, always NaN -- would need the thousands of
+                       per-block chrN_cluster_hashes_<start>-<end>.tsv files,
+                       not fetched by default; see fetch_haploblock_boundaries()),
+                       hash_length (float, NaN if a chromosome's
+                       *_haploblock_hashes.tsv wasn't available/parseable),
                        cluster_diff_score (float, always NaN for real
                        data -- an actual differentiation score needs
                        population labels and belongs in Stage 6, not here).
@@ -68,8 +72,8 @@ from __future__ import annotations
 
 import argparse
 import logging
-import re
 import sys
+from io import StringIO
 from pathlib import Path
 
 import numpy as np
@@ -285,77 +289,88 @@ def load_dbvar_sv_calls(call_vcf_path: Path, region_vcf_path: Path) -> pd.DataFr
         return None
 
 
-_HAPLOBLOCK_FILE_RE = re.compile(r'href="(chr\w+_cluster_hashes_(\d+)-(\d+)\.tsv)"')
+def fetch_haploblock_boundaries(base_url: str, chroms: list[str], timeout: int = 30) -> pd.DataFrame | None:
+    """Fetch haploblock boundaries (and, where available, a per-block hash
+    length) from data.haploblocks.org's per-chromosome aggregate files.
 
-
-def list_haploblock_block_files(chrom: str, base_url: str, timeout: int = 30) -> list[tuple[str, int, int]]:
-    """List (filename, start, end) for a chromosome's haploblock TSVs via the Apache directory index."""
-    try:
-        import requests
-
-        resp = requests.get(f"{base_url}/{chrom}/", timeout=timeout)
-        resp.raise_for_status()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Failed to list haploblock directory for %s: %s", chrom, exc)
-        return []
-    blocks = [(fname, int(start), int(end)) for fname, start, end in _HAPLOBLOCK_FILE_RE.findall(resp.text)]
-    blocks.sort(key=lambda b: b[1])
-    return blocks
-
-
-def fetch_haploblock_cluster_data(
-    base_url: str, chroms: list[str], max_blocks_per_chrom: int, timeout: int = 30
-) -> pd.DataFrame | None:
-    """Fetch data.haploblocks.org's per-block cluster-hash TSVs and summarize each into one row.
-
-    Each `chrN_cluster_hashes_<start>-<end>.tsv` file lists one row per distinct
-    haplotype cluster observed in that block (CLUSTER id, HASH bit-string) -- it
-    defines the block's boundaries (from the filename) and cluster count, but not
-    per-sample cluster membership, so `cluster_diff_score` (a differentiation
-    metric) is left for a later stage that has population labels to work with.
-    Only the summary is kept; raw per-block files are not persisted to disk given
-    a genome-wide run touches tens of thousands of them.
+    Each chromosome subdirectory publishes a single
+    `<chrom>_haploblock_boundaries_<chrom>.tsv` (columns START, END -- one
+    row per haploblock) and usually a single `<chrom>_haploblock_hashes.tsv`
+    (columns START, END, HASH -- one representative hash per haploblock,
+    not the full per-cluster enumeration the individual
+    `chrN_cluster_hashes_<start>-<end>.tsv` files under the same directory
+    give). Fetching those thousands of individual per-block files does not
+    scale to a genome-wide default (tens of thousands of HTTP requests, ~2-3
+    minutes observed against the real site for a 50-blocks/chromosome cap
+    alone); these two per-chromosome aggregates give one small request each
+    instead (23 total for the whole genome), so `n_clusters` (which needs
+    the per-block cluster enumeration) is not derivable this way and stays
+    NaN -- only `hash_length` is recovered, from the single hash's length.
     """
     import requests
 
-    rows = []
-    n_failed = 0
+    frames = []
+    n_chrom_failed = 0
     for chrom in chroms:
-        blocks = list_haploblock_block_files(chrom, base_url, timeout=timeout)
-        if not blocks:
-            log.warning("No haploblock TSV files found for %s under %s", chrom, base_url)
+        boundaries_url = f"{base_url}/{chrom}/{chrom}_haploblock_boundaries_{chrom}.tsv"
+        try:
+            resp = requests.get(boundaries_url, timeout=timeout)
+            resp.raise_for_status()
+            boundaries = pd.read_csv(StringIO(resp.text), sep="\t")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to fetch haploblock boundaries for %s: %s", chrom, exc)
+            n_chrom_failed += 1
             continue
-        if max_blocks_per_chrom > 0:
-            blocks = blocks[:max_blocks_per_chrom]
-        log.info("Fetching %d haploblock TSV file(s) for %s", len(blocks), chrom)
-        for fname, start, end in blocks:
-            try:
-                resp = requests.get(f"{base_url}/{chrom}/{fname}", timeout=timeout)
-                resp.raise_for_status()
-                lines = [line for line in resp.text.splitlines() if line.strip()]
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Failed to fetch %s: %s", fname, exc)
-                n_failed += 1
-                continue
-            data_lines = lines[1:] if lines and lines[0].upper().startswith("CLUSTER") else lines
-            hash_length = len(data_lines[0].split("\t")[1]) if data_lines and "\t" in data_lines[0] else np.nan
-            rows.append(
-                {
-                    "haploblock_id": f"{chrom}_{start}_{end}",
-                    "chrom": chrom,
-                    "start": start,
-                    "end": end,
-                    "n_snps": np.nan,
-                    "n_clusters": len(data_lines),
-                    "hash_length": hash_length,
-                    "cluster_diff_score": np.nan,
-                }
-            )
-    if n_failed:
-        log.warning("%d haploblock TSV file(s) failed to download and were skipped", n_failed)
-    if not rows:
+        start_col = _find_column(list(boundaries.columns), ["start"])
+        end_col = _find_column(list(boundaries.columns), ["end"])
+        if not (start_col and end_col):
+            log.warning("%s: haploblock boundaries file has no START/END columns, skipping", chrom)
+            n_chrom_failed += 1
+            continue
+        chrom_df = pd.DataFrame(
+            {"start": boundaries[start_col].astype(int), "end": boundaries[end_col].astype(int)}
+        )
+
+        hashes_url = f"{base_url}/{chrom}/{chrom}_haploblock_hashes.tsv"
+        try:
+            resp = requests.get(hashes_url, timeout=timeout)
+            resp.raise_for_status()
+            # dtype=str: the HASH column is a zero-padded digit string (e.g.
+            # "00000000000000000001") that pandas would otherwise silently
+            # parse as an integer, stripping the leading zeros and corrupting
+            # its length
+            hashes = pd.read_csv(StringIO(resp.text), sep="\t", dtype=str)
+            h_start_col = _find_column(list(hashes.columns), ["start"])
+            h_end_col = _find_column(list(hashes.columns), ["end"])
+            h_hash_col = _find_column(list(hashes.columns), ["hash"])
+            if h_start_col and h_end_col and h_hash_col:
+                hashes = hashes.rename(columns={h_start_col: "start", h_end_col: "end", h_hash_col: "hash_value"})
+                hashes["start"] = hashes["start"].astype(int)
+                hashes["end"] = hashes["end"].astype(int)
+                chrom_df = chrom_df.merge(hashes[["start", "end", "hash_value"]], on=["start", "end"], how="left")
+                chrom_df["hash_length"] = chrom_df["hash_value"].dropna().astype(str).str.len()
+                chrom_df = chrom_df.drop(columns=["hash_value"])
+            else:
+                chrom_df["hash_length"] = np.nan
+        except Exception as exc:  # noqa: BLE001
+            log.info("No/unusable haploblock_hashes file for %s (%s); hash_length left NaN", chrom, exc)
+            chrom_df["hash_length"] = np.nan
+
+        chrom_df["chrom"] = chrom
+        chrom_df["haploblock_id"] = [f"{chrom}_{s}_{e}" for s, e in zip(chrom_df["start"], chrom_df["end"])]
+        chrom_df["n_snps"] = np.nan
+        chrom_df["n_clusters"] = np.nan
+        chrom_df["cluster_diff_score"] = np.nan
+        log.info("%s: fetched %d haploblock boundaries", chrom, len(chrom_df))
+        frames.append(chrom_df[["haploblock_id", "chrom", "start", "end", "n_snps", "n_clusters", "hash_length", "cluster_diff_score"]])
+
+    if n_chrom_failed:
+        log.warning("%d/%d chromosome(s) failed to fetch haploblock boundaries", n_chrom_failed, len(chroms))
+    if not frames:
         return None
-    return pd.DataFrame(rows)
+    result = pd.concat(frames, ignore_index=True)
+    log.info("Fetched %d haploblock boundaries across %d chromosome(s)", len(result), len(frames))
+    return result
 
 
 def load_real_sv_calls(vcf_path: Path) -> pd.DataFrame | None:
@@ -682,8 +697,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--haploblock-source", default=None, help="Local path or URL to a single already-prepared haploblock/cluster table (overrides the haploblocks.org auto-fetch below)")
     p.add_argument("--haploblock-genome-build", default="GRCh38", help="Genome build of --haploblock-source, if given")
     p.add_argument("--haploblock-hash-base-url", default=HAPLOBLOCK_HASH_BASE_URL)
-    p.add_argument("--haploblock-chroms", default="chr21", help="Comma-separated chromosomes (e.g. chr21,chr22), or 'all' for 1-22+X -- 'all' is tens of thousands of file downloads and slow")
-    p.add_argument("--haploblock-max-blocks-per-chrom", type=int, default=50, help="Cap per chromosome for a fast default run; 0 = unlimited")
+    p.add_argument("--haploblock-chroms", default="all", help="Comma-separated chromosomes (e.g. chr21,chr22), or 'all' (default) for 1-22+X. One small aggregate-boundaries file is fetched per chromosome (23 requests total for 'all'), not one file per haploblock")
     p.add_argument("--skip-haploblock-download", action="store_true", help="Skip the automatic haploblocks.org fetch; go straight to synthetic haploblocks (unless --haploblock-source is given)")
     p.add_argument("--panel-source", default=None, help="Local path or URL to 1000 Genomes sample panel")
     p.add_argument("--target-genome-build", default="GRCh38")
@@ -741,7 +755,7 @@ def main(argv=None) -> None:
             if args.haploblock_chroms.strip().lower() == "all"
             else [c.strip() for c in args.haploblock_chroms.split(",") if c.strip()]
         )
-        haploblocks = fetch_haploblock_cluster_data(args.haploblock_hash_base_url, chroms, args.haploblock_max_blocks_per_chrom)
+        haploblocks = fetch_haploblock_boundaries(args.haploblock_hash_base_url, chroms)
         if haploblocks is not None:
             # data.haploblocks.org is GRCh38-based; still route through the same harmonization
             # path as every other source for a consistent, non-silent build-mismatch check

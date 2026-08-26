@@ -11,8 +11,8 @@
     "output_rows": 36363
   },
   "haploblocks": {
-    "input_rows": 50,
-    "output_rows": 50,
+    "input_rows": 39113,
+    "output_rows": 39113,
     "validation": "passed (sorted and non-overlapping per chromosome)"
   }
 }
