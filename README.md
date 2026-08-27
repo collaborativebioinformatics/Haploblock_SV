@@ -43,7 +43,7 @@ The wider pipeline is exploratory rather than a fixed production analysis. It is
 
 # Workflow
 
-![Cluster-aware Haploblock SV workflow](flowchart_haploblock_SV.png)
+![Cluster-aware Haploblock SV workflow](flowchart_haploblock_SV_upd.png)
 
 ## Data
 
