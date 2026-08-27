@@ -1,1 +1,4 @@
 claude-first-prototype/local_test_output/
+__pycache__/
+.pytest_cache/
+*.pyc

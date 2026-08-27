@@ -71,11 +71,38 @@ Kanpig needs resolved variant sequences, so this current input contains DEL and 
 python claude-first-prototype/pipeline/stage1_cluster_aware.py
 ```
 
-The default output directory is `claude-first-prototype/stage1_output/`. Chromosomes are processed separately so work can be parallelized and rerun selectively. The primary downstream file is:
+The default output directory is `claude-first-prototype/stage1_output/`. Chromosomes are processed separately so work can be parallelized and rerun selectively. Stage 1 now keeps the normalized inputs needed by later analyses instead of treating them as temporary files:
 
-- `sv_to_clusters.tsv`: SV metadata joined to every cluster that passes the association threshold.
+- `sv_genotypes.<chrom>.tsv`: one row per SV, with normalized metadata followed by one raw GT column per sample. This is the Stage 4 and Stage 7 genotype contract.
+- `samples.tsv`: canonical sample IDs and their original VCF IDs.
+- `haploblocks.<chrom>.tsv`: one row per haploblock.
+- `cluster_memberships.<chrom>.tsv`: one row per represented sample haplotype and haploblock cluster. This is the independent cluster input for Stages 6 and 7.
+- `sv_block_summary.<chrom>.tsv`: one row per overlapping SV and haploblock, including association counts but never duplicating a pair by passing cluster. This is the counting input for Stage 5.
+- `sv_to_clusters.<chrom>.tsv`: one row per SV, haploblock, and cluster that passes the association threshold.
 
-Useful method diagnostics are kept under `debug_and_qc/`. Temporary genotype tables, downloaded intermediates, and sample-ID maps are not intended as downstream products and may be removed after use.
+All paths are registered in `stage1_output/config.yaml`. Population labels remain independent of cluster inference: pass the Stage 0 table with `--sample-metadata` to register it for Stages 4, 6, and 7. Useful method diagnostics are kept under `debug_and_qc/`; downloaded cluster files remain temporary and are removed after a successful run.
+
+The table keys and row meanings are part of the contract:
+
+| Path key | One row per | Required identity columns |
+|---|---|---|
+| `sv_genotypes` | input VCF record | `sv_id`, `chrom`, `start`, `end`, `sv_type`; sample GT columns follow the fixed metadata columns |
+| `haploblocks` | haploblock | `haploblock_id`, `chrom`, `start`, `end` |
+| `cluster_memberships` | complete sample haplotype assignment | `haploblock_id`, `sample_id`, `haplotype`, `cluster_id` |
+| `sv_block_summary` | overlapping SV–haploblock pair | `sv_id`, `haploblock_id`; this key is unique even when several clusters pass |
+| `sv_to_clusters` | passing SV–haploblock–cluster association | `sv_id`, `haploblock_id`, `cluster_id` |
+
+The optional `sample_metadata` table must use the canonical `sample_id` values in `samples.tsv` and provide a `population` column. A `superpopulation` column may also be supplied, but downstream analyses must state explicitly which grouping they use.
+
+### Downstream ownership
+
+| Stage | Stage 1 inputs |
+|---|---|
+| 4 | `sv_genotypes`, `sample_metadata`, and `sv_block_summary` |
+| 5 | `sv_block_summary` and `haploblocks`; count unique `sv_id, haploblock_id` pairs |
+| 6 | Stage 4 classifications plus `cluster_memberships` and `sample_metadata` |
+| 7 | `sv_genotypes`, `cluster_memberships`, and `sample_metadata` |
+| 8 | Stage 4 classifications plus SV coordinates and types from `sv_genotypes` |
 
 ### Interpreting `sv_to_clusters.tsv`
 

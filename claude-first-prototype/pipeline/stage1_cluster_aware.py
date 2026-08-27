@@ -33,6 +33,12 @@ def parse_chroms(value: str) -> list[str]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vcf", type=Path, default=DEFAULT_VCF)
+    parser.add_argument(
+        "--sample-metadata",
+        type=Path,
+        default=None,
+        help="Optional sample-to-population table produced by Stage 0",
+    )
     parser.add_argument("--out-dir", type=Path, default=Path("stage1_output"))
     parser.add_argument("--chroms", default="all", help="Comma-separated chromosomes or 'all' for chr1-22,X")
     parser.add_argument("--cluster-base-url", default="https://data.haploblocks.org/haploblock_hashes/1000G")
@@ -94,6 +100,11 @@ def main(argv: list[str] | None = None) -> None:
         },
         "paths": {
             "vcf": str(args.vcf.resolve()),
+            "samples": str((args.out_dir / "samples.tsv").resolve()),
+            "sv_genotypes": {
+                chrom: str((args.out_dir / f"sv_genotypes.{chrom}.tsv").resolve())
+                for chrom in chroms
+            },
             "sv_to_clusters": {
                 chrom: str((args.out_dir / f"sv_to_clusters.{chrom}.tsv").resolve())
                 for chrom in chroms
@@ -102,9 +113,19 @@ def main(argv: list[str] | None = None) -> None:
                 chrom: str((args.out_dir / f"haploblocks.{chrom}.tsv").resolve())
                 for chrom in chroms
             },
+            "cluster_memberships": {
+                chrom: str((args.out_dir / f"cluster_memberships.{chrom}.tsv").resolve())
+                for chrom in chroms
+            },
+            "sv_block_summary": {
+                chrom: str((args.out_dir / f"sv_block_summary.{chrom}.tsv").resolve())
+                for chrom in chroms
+            },
             "debug_and_qc": str((args.out_dir / "debug_and_qc").resolve()),
         },
     }
+    if args.sample_metadata is not None:
+        config["paths"]["sample_metadata"] = str(args.sample_metadata.resolve())
     config_path = args.out_dir / "config.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
     log.info("Stage 1 complete: %s", config_path.resolve())
