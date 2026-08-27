@@ -15,7 +15,7 @@ from pathlib import Path
 
 import yaml
 
-from match_svs_to_clusters import ALL_CHROMS, run as run_cluster_aware
+from match_svs_to_clusters import ALL_CHROMS, request_with_retries, run as run_cluster_aware
 from sv_contract import canonical_sample_id, normalize_chrom
 
 
@@ -24,6 +24,15 @@ log = logging.getLogger("stage1_cluster_aware")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_VCF = REPO_ROOT / "input" / "1kgp_ont_cohort.postfilter.full.vcf.gz"
+DEFAULT_SAMPLE_METADATA_URL = (
+    "https://s3.amazonaws.com/1000g-ont/PROCESSED_DATA/"
+    "1kGP_LRSC_500_ONT_Metadata.tsv"
+)
+METADATA_COLUMN_NAMES = {
+    "NHGRI_ID": "sample_id",
+    "SubPopulation": "population",
+    "SuperPopulation": "superpopulation",
+}
 
 
 def parse_chroms(value: str) -> list[str]:
@@ -42,9 +51,13 @@ def normalize_sample_metadata(source: Path, samples_path: Path, destination: Pat
 
     with source.open() as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        fieldnames = reader.fieldnames
+        fieldnames = [METADATA_COLUMN_NAMES.get(name, name) for name in reader.fieldnames]
         metadata_by_sample = {}
-        for row in reader:
+        for source_row in reader:
+            row = {
+                METADATA_COLUMN_NAMES.get(name, name): value
+                for name, value in source_row.items()
+            }
             row["sample_id"] = original_to_canonical.get(
                 row["sample_id"], canonical_sample_id(row["sample_id"])
             )
@@ -64,7 +77,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--sample-metadata",
         type=Path,
         default=None,
-        help="Optional sample-to-population table produced by Stage 0",
+        help="Override the default 1000 Genomes ONT sample metadata table",
     )
     parser.add_argument("--out-dir", type=Path, default=Path("stage1_output"))
     parser.add_argument("--chroms", default="all", help="Comma-separated chromosomes or 'all' for chr1-22,X")
@@ -87,6 +100,14 @@ def main(argv: list[str] | None = None) -> None:
     chroms = parse_chroms(args.chroms)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
+    metadata_source = args.sample_metadata
+    if metadata_source is None:
+        metadata_source = args.out_dir / "1kGP_LRSC_500_ONT_Metadata.tsv"
+        log.info("Downloading sample metadata from %s", DEFAULT_SAMPLE_METADATA_URL)
+        metadata_source.write_bytes(
+            request_with_retries(DEFAULT_SAMPLE_METADATA_URL, args.retries)
+        )
+
     log.info("Running cluster-aware preprocessing for %d chromosome(s)", len(chroms))
     run_cluster_aware(
         argparse.Namespace(
@@ -106,14 +127,12 @@ def main(argv: list[str] | None = None) -> None:
         )
     )
 
-    normalized_metadata_path = None
-    if args.sample_metadata is not None:
-        normalized_metadata_path = args.out_dir / "sample_metadata.tsv"
-        normalize_sample_metadata(
-            args.sample_metadata,
-            args.out_dir / "samples.tsv",
-            normalized_metadata_path,
-        )
+    normalized_metadata_path = args.out_dir / "sample_metadata.tsv"
+    normalize_sample_metadata(
+        metadata_source,
+        args.out_dir / "samples.tsv",
+        normalized_metadata_path,
+    )
 
     config = {
         "genome_build": "GRCh38",
@@ -159,9 +178,12 @@ def main(argv: list[str] | None = None) -> None:
             "debug_and_qc": str((args.out_dir / "debug_and_qc").resolve()),
         },
     }
-    if args.sample_metadata is not None:
-        config["data_sources"]["sample_metadata"] = str(args.sample_metadata.resolve())
-        config["paths"]["sample_metadata"] = str(normalized_metadata_path.resolve())
+    config["data_sources"]["sample_metadata"] = (
+        str(args.sample_metadata.resolve())
+        if args.sample_metadata is not None
+        else DEFAULT_SAMPLE_METADATA_URL
+    )
+    config["paths"]["sample_metadata"] = str(normalized_metadata_path.resolve())
     config_path = args.out_dir / "config.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
     log.info("Stage 1 complete: %s", config_path.resolve())

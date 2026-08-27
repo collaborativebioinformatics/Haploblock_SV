@@ -7,6 +7,7 @@
 - Ported Stage 4 to classify common and population-specific SVs directly from Stage 1 genotypes and population metadata, without using haploblock cluster labels.
 - Ported Stage 5 to test per-haploblock SV-type enrichment from unique SV–block pairs using block-length-adjusted Poisson expectations and Benjamini–Hochberg correction.
 - Added focused contract tests and carried-forward configuration files so later stages can consume the reconciled outputs consistently.
+- Made the 1000 Genomes ONT sample metadata the Stage 1 default when no metadata file is supplied, with its source columns normalized to the downstream contract.
 
 ### Bug fixes
 

@@ -113,6 +113,57 @@ def test_stage1_publishes_downstream_contract(tmp_path: Path) -> None:
     }
 
 
+def test_stage1_downloads_default_ont_metadata(tmp_path: Path, monkeypatch) -> None:
+    def write_samples(args) -> None:
+        args.out_dir.mkdir(parents=True, exist_ok=True)
+        (args.out_dir / "samples.tsv").write_text(
+            "sample_id\toriginal_sample_id\nNA00001\tGM00001\nSAMPLE2\tSAMPLE2\n"
+        )
+
+    downloaded_metadata = (
+        "NHGRI_ID\tSex\tSubPopulation\tSuperPopulation\tONT_library\tONT_pore\n"
+        "GM00001\tXY\tPOP1\tSUPER1\tLSK110\tR9\n"
+        "SAMPLE2\tXX\tPOP2\tSUPER2\tLSK114\tR10\n"
+    ).encode()
+    monkeypatch.setattr(stage1_cluster_aware, "run_cluster_aware", write_samples)
+    monkeypatch.setattr(
+        stage1_cluster_aware,
+        "request_with_retries",
+        lambda url, retries: downloaded_metadata,
+    )
+
+    out_dir = tmp_path / "stage1_output"
+    stage1_cluster_aware.main(
+        ["--vcf", str(tmp_path / "cohort.vcf.gz"), "--chroms", "chr1", "--out-dir", str(out_dir)]
+    )
+
+    assert read_tsv(out_dir / "sample_metadata.tsv") == [
+        {
+            "sample_id": "NA00001",
+            "Sex": "XY",
+            "population": "POP1",
+            "superpopulation": "SUPER1",
+            "ONT_library": "LSK110",
+            "ONT_pore": "R9",
+        },
+        {
+            "sample_id": "SAMPLE2",
+            "Sex": "XX",
+            "population": "POP2",
+            "superpopulation": "SUPER2",
+            "ONT_library": "LSK114",
+            "ONT_pore": "R10",
+        },
+    ]
+    config = yaml.safe_load((out_dir / "config.yaml").read_text())
+    assert config["data_sources"]["sample_metadata"] == (
+        stage1_cluster_aware.DEFAULT_SAMPLE_METADATA_URL
+    )
+    assert config["paths"]["sample_metadata"] == str(
+        (out_dir / "sample_metadata.tsv").resolve()
+    )
+
+
 def test_legacy_cleanup_keeps_published_contracts(tmp_path: Path) -> None:
     membership_path = tmp_path / "cluster_memberships.chr6.tsv"
     membership_path.write_text("published\n")
