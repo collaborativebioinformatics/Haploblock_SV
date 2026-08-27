@@ -29,9 +29,9 @@ The wider pipeline is exploratory rather than a fixed production analysis. It is
 
 - Infer which haplotype clusters within each haploblock carry each SV (currently DEL and INS)
 - Separately, if useful, check whether SVs fall near or across haploblock boundaries
-- Check if specific haploblocks are prone to particular SV types
+- Assess Haploblock enrichment for specific SV types by testing whether certain haploblocks contain significantly higher or lower number of particular SV classes.
+- Classify structural variants (SVs) as common or population-specific based on population frequency data
 - Check if these SVs correlate with 1000 Genomes population clusters
-- Check whether any duplications (Maria) and/or inversions (Alistair) stand out when a suitable callset is available
 - Wrap it up in a re-usable and scalable pipeline
 
 
@@ -41,10 +41,7 @@ The wider pipeline is exploratory rather than a fixed production analysis. It is
 - Maria Fernanda Cardenas maria.cardenas@stjude.org
 - Linh Nguyen nguyen.linh.1010@ku.edu
 
-
 ![Cluster-aware Haploblock SV workflow](flowchart_haploblock_SV.png)
-
-![flowchart_haploblock_SV_upd.png](flowchart_haploblock_SV_upd.png)
 
 ## Data
 
@@ -85,7 +82,8 @@ The pipeline is currently under active development
 
 # Future steps
 
-- Generate Region-level FASTA including SNP and SV information to regenerate Clustering Haploblock with MMseqs2 and to confirm that the genomic hashes don't have any deviation with the ones originated previously 
+- Create region-level FASTA files containing SNPs and SVs, reclusters the haploblocks using MMseqs2, and verify that the resulting clusters match the original ones. 
 
 
 # References
+https://osf.io/preprints/biohackrxiv/xhkc3_v1
