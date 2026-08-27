@@ -41,6 +41,8 @@ The wider pipeline is exploratory rather than a fixed production analysis. It is
 - Maria Fernanda Cardenas maria.cardenas@stjude.org
 - Linh Nguyen nguyen.linh.1010@ku.edu
 
+# Workflow
+
 ![Cluster-aware Haploblock SV workflow](flowchart_haploblock_SV.png)
 
 ## Data
