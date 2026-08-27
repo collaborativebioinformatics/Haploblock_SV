@@ -2,16 +2,37 @@
 
 # Haploblock_SV
 
+# Quickstart
+Install dependencies:
+```bash
+pip install -r claude-first-prototype/requirements.txt
+```
+
+Run the pipeline:
+```bash
+python claude-first-prototype/pipeline/stage1_cluster_aware.py
+```
+
+The current workflow starts from a previously merged VCF and writes chromosome-specific SV-to-cluster association tables into `stage1_output/`.
+See [claude-first-prototype/README.md](claude-first-prototype/README.md) for output fields, interpretation, QC, and the optional boundary-position analysis.
+Stage 0 is currently a placeholder to download single-sample VCFs from 1kgp and merge them into a cohort VCF.
+
 # Overview
 
-We aim to reveal how structural variation is organized within and around haploblocks, and what that says about population structure. This is a Follow up on previous projects: [haploblocks.org](https://haploblocks.org) and [data.haploblocks.org](https://data.haploblocks.org)
+We aim to reveal how structural variation is organized within and around haploblocks, and what that may tell us about haplotype and population structure.
 
-Specifically, the workflow will: 
-- Identify structural variants (SVs) including deletions, duplications, inversions and insertions that occur within haploblocks, and determine whether any SV-breakpoints overlap or occur near haploblock boundaries.
-- Classifies SVs as common or population-specific using population allele frequency data, creating seperate datasets for downstream comparitive analysis. 
-- Assess haploblock enrichment for specifc SV types by testing whether certain haploblocks contain significanlty higher or lower numbers of particular SV classess than expected based on haploblock size and overall SV distribution
-- Evaluate relationship between SV patterns and population structure by comparing SV classifiers and distributions with population cluster derived from 1000 Genome small-variant hashes [data.haploblocks.org] 
-- Develp a reusable and scalable analysis pipeline that automates the SV annotation, classification, enrichment testing, and population strucutre comparisons, allowing the workflow applied efficiently to additional datasets and future studies. 
+This project follows [haploblocks.org](https://haploblocks.org) and [data.haploblocks.org](https://data.haploblocks.org), which determined haploblock boundaries and clustered haplotypes within each block using 1000 Genomes small variants. Those results did not incorporate structural variants, so they cannot directly identify which existing haplotype clusters carry a particular SV.
+
+So far implemented: cluster-aware preprocessing that combines cohort SV genotypes with those existing cluster memberships and probabilistically assigns SVs to one or more clusters. This is necessary because the VCF and haploblock clusters were phased independently, so their `hap0` and `hap1` labels cannot be matched directly.
+
+The wider pipeline is exploratory rather than a fixed production analysis. It is intended to test biological expectations about SVs and haploblocks—for example, whether SVs consistently mark particular haplotype clusters, whether some blocks or clusters contain unusual SV patterns, and whether those patterns reflect population structure. The downstream analyses will evolve as these assumptions are evaluated.
+
+- Infer which haplotype clusters within each haploblock carry each SV (currently DEL and INS)
+- Separately, if useful, check whether SVs fall near or across haploblock boundaries
+- Check if specific haploblocks are prone to particular SV types
+- Check if these SVs correlate with 1000 Genomes population clusters
+- Check whether any duplications (Maria) and/or inversions (Alistair) stand out when a suitable callset is available
+- Wrap it up in a re-usable and scalable pipeline
 
 
 ## Contributors
@@ -21,7 +42,7 @@ Specifically, the workflow will:
 - Linh Nguyen nguyen.linh.1010@ku.edu
 
 
-## Flowchart
+![Cluster-aware Haploblock SV workflow](flowchart_haploblock_SV.png)
 
 ![flowchart_haploblock_SV_upd.png](flowchart_haploblock_SV_upd.png)
 

@@ -1,194 +1,165 @@
-"""Stage 2: SV x haploblock intersection for the Haploblock_SV pipeline.
+"""Optional Stage 2: classify cohort SVs relative to haploblock boundaries.
 
-Reads Stage 1's sv_calls.tsv and haploblocks.tsv (paths from --config) and
-classifies each SV by position relative to the haploblock(s) on its
-chromosome:
-
-  within_block      fully contained in exactly one block, and at least
-                     `boundary_distance_bp` (N, from config.yaml) away from
-                     both of that block's edges.
-  boundary_crossing  overlaps more than one block (crosses a shared edge
-                     between two blocks), OR is fully contained in one
-                     block but within N bp of an edge, OR does not overlap
-                     any block but lies within N bp of one (a near-miss,
-                     relevant for e.g. a haploblock table with gaps -- real
-                     data.haploblocks.org blocks observed so far are
-                     contiguous, so this case mostly only fires at the very
-                     start/end of a chromosome's covered span).
-  outside_block      no block on the SV's chromosome is within N bp at all.
-
-No bedtools/pybedtools: haploblocks are non-overlapping within a
-chromosome (Stage 1 enforces this; Stage 2 re-validates it defensively
-since it depends on that invariant and must stay independently runnable),
-so per chromosome this reduces to a sorted 1D interval search done here
-with numpy.searchsorted, not a general-purpose interval-join library.
-
-Output contract for pipeline/stage3_boundary_enrichment.py and
-pipeline/stage4_classify_af.py (neither implemented yet): same TSV/columns
-as Stage 1's sv_calls.tsv, plus:
-  - position_class (str): one of within_block / boundary_crossing / outside_block
-  - haploblock_id   (str): comma-joined ids of every block the SV was
-                     matched against (see the boundary_crossing definition
-                     above for when this is >1 id). In memory this is ""
-                     for an outside_block row, but pandas.read_csv reads
-                     an empty TSV field back as NaN (float), not "" -- a
-                     reader must handle both, e.g. `.fillna("")` before
-                     any `.str` accessor call, or filter on position_class
-                     instead of on haploblock_id being empty/null.
-haploblocks.tsv and sample_metadata.tsv are copied through unchanged (like
-Stage 1 does), and config.yaml is copied with `paths` repointed at this
-stage's own output directory, so Stage 3/4 can chain via --config the same
-way Stage 1/2 do.
+Stage 1 already links SVs to associated haplotype clusters. This script is
+only needed for the separate positional question: whether SVs lie inside,
+near, or across haploblock boundaries. It reads the same VCF and the compact
+per-chromosome haploblock tables registered in Stage 1's config.yaml.
 """
 
 from __future__ import annotations
 
 import argparse
+import gzip
+import json
 import logging
-import shutil
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import yaml
 
+from match_svs_to_clusters import normalize_chrom, parse_info, parse_length, simplify_sv_id
+
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger("stage2_intersect")
 
 
-def load_config(config_path: Path) -> dict:
-    with open(config_path) as fh:
-        config = yaml.safe_load(fh)
-    for key in ("paths", "thresholds"):
-        if key not in config:
-            raise ValueError(f"{config_path} is missing required top-level key '{key}'")
-    return config
-
-
-def _validate_sorted_nonoverlapping(chrom: str, starts: np.ndarray, ends: np.ndarray) -> None:
-    """Defensive re-check of Stage 1's invariant: the searchsorted-based
-    matching below is only correct if, per chromosome, blocks are sorted by
-    start and non-overlapping. Raise rather than silently mis-classify.
-    """
-    if len(starts) < 2:
-        return
-    if not np.all(starts[1:] >= starts[:-1]):
-        raise ValueError(f"{chrom}: haploblocks are not sorted by start -- run Stage 1 first")
-    if np.any(starts[1:] < ends[:-1]):
-        bad = np.nonzero(starts[1:] < ends[:-1])[0]
-        raise ValueError(
-            f"{chrom}: haploblocks overlap at index/indices {list(bad)} -- run Stage 1 first"
-        )
-
-
 def classify_sv_positions(sv: pd.DataFrame, hb: pd.DataFrame, boundary_bp: int) -> pd.DataFrame:
-    """Return sv with `position_class` and `haploblock_id` columns added."""
     position_class = np.full(len(sv), "outside_block", dtype=object)
-    haploblock_id = np.full(len(sv), "", dtype=object)
+    haploblock_ids = np.full(len(sv), "", dtype=object)
 
     for chrom, hb_group in hb.groupby("chrom", sort=False):
         hb_group = hb_group.sort_values("start")
         starts = hb_group["start"].to_numpy()
         ends = hb_group["end"].to_numpy()
         ids = hb_group["haploblock_id"].to_numpy()
-        _validate_sorted_nonoverlapping(chrom, starts, ends)
-
         sv_mask = (sv["chrom"] == chrom).to_numpy()
         if not sv_mask.any():
             continue
+
         sv_starts = sv.loc[sv_mask, "start"].to_numpy()
         sv_ends = sv.loc[sv_mask, "end"].to_numpy()
-
-        # candidate block index range per SV, widened by N so near-misses aren't missed
-        idx_lo = np.searchsorted(ends, sv_starts - boundary_bp, side="left")
-        idx_hi = np.searchsorted(starts, sv_ends + boundary_bp, side="right") - 1
-
         chrom_classes = np.full(sv_mask.sum(), "outside_block", dtype=object)
-        chrom_block_ids = np.full(sv_mask.sum(), "", dtype=object)
-        for row_i, (s, e, lo, hi) in enumerate(zip(sv_starts, sv_ends, idx_lo, idx_hi)):
-            if lo > hi:
-                continue  # no candidate block within N bp on this chromosome
+        chrom_ids = np.full(sv_mask.sum(), "", dtype=object)
+
+        for row_index, (sv_start, sv_end) in enumerate(zip(sv_starts, sv_ends)):
+            first = np.searchsorted(ends, sv_start - boundary_bp, side="left")
+            last = np.searchsorted(starts, sv_end + boundary_bp, side="right")
             relevant = []
-            fully_contained_far_from_edges = None
-            for j in range(lo, hi + 1):
-                b_start, b_end, b_id = starts[j], ends[j], ids[j]
-                overlaps = s < b_end and e > b_start
+            safely_inside = None
+            for block_index in range(first, last):
+                block_start = starts[block_index]
+                block_end = ends[block_index]
+                overlaps = sv_start < block_end and sv_end > block_start
                 if overlaps:
-                    relevant.append(b_id)
-                    contained = b_start <= s and e <= b_end
-                    if contained and (s - b_start) >= boundary_bp and (b_end - e) >= boundary_bp:
-                        fully_contained_far_from_edges = b_id
+                    relevant.append(ids[block_index])
+                    if (
+                        block_start <= sv_start
+                        and sv_end <= block_end
+                        and sv_start - block_start >= boundary_bp
+                        and block_end - sv_end >= boundary_bp
+                    ):
+                        safely_inside = ids[block_index]
                 else:
-                    gap = (b_start - e) if b_start >= e else (s - b_end)
+                    gap = block_start - sv_end if block_start >= sv_end else sv_start - block_end
                     if 0 <= gap < boundary_bp:
-                        relevant.append(b_id)
+                        relevant.append(ids[block_index])
+
             if not relevant:
                 continue
-            if len(relevant) == 1 and fully_contained_far_from_edges is not None:
-                chrom_classes[row_i] = "within_block"
-            else:
-                chrom_classes[row_i] = "boundary_crossing"
-            chrom_block_ids[row_i] = ",".join(relevant)
+            chrom_classes[row_index] = (
+                "within_block" if len(relevant) == 1 and safely_inside is not None else "boundary_crossing"
+            )
+            chrom_ids[row_index] = ",".join(relevant)
 
         position_class[sv_mask] = chrom_classes
-        haploblock_id[sv_mask] = chrom_block_ids
+        haploblock_ids[sv_mask] = chrom_ids
 
-    out = sv.copy()
-    out["position_class"] = position_class
-    out["haploblock_id"] = haploblock_id
-    return out
-
-
-def parse_args(argv=None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config", default="stage1_output/config.yaml", help="Stage 1's config.yaml")
-    p.add_argument("--out-dir", default="stage2_output", help="Output directory for the annotated SV table + this stage's own config.yaml")
-    p.add_argument("--boundary-distance-bp", type=int, default=None, help="Overrides config.yaml's thresholds.boundary_distance_bp")
-    return p.parse_args(argv)
+    result = sv.copy()
+    result["position_class"] = position_class
+    result["haploblock_id"] = haploblock_ids
+    return result
 
 
-def main(argv=None) -> None:
+def load_sv_metadata(vcf_path: Path, chroms: list[str], max_id_length: int) -> dict[str, pd.DataFrame]:
+    selected = set(chroms)
+    rows = {chrom: [] for chrom in chroms}
+    record_counts: Counter[str] = Counter()
+    with gzip.open(vcf_path, "rt") as handle:
+        for line in handle:
+            if line.startswith("#"):
+                continue
+            fields = line.rstrip("\n").split("\t")
+            chrom = normalize_chrom(fields[0])
+            if chrom not in selected:
+                continue
+            position = int(fields[1])
+            start = position - 1
+            info = parse_info(fields[7])
+            end_value = info.get("END")
+            end = int(end_value) if isinstance(end_value, str) and end_value != "." else position
+            sv_type = str(info.get("SVTYPE", "MISSING"))
+            source_id = fields[2] if fields[2] != "." else f"{chrom}:{position}:{sv_type}:{record_counts[chrom] + 1}"
+            rows[chrom].append(
+                {
+                    "sv_id": simplify_sv_id(source_id, chrom, start, end, sv_type, max_id_length),
+                    "chrom": chrom,
+                    "start": start,
+                    "end": end,
+                    "sv_type": sv_type,
+                    "length": parse_length(info, start, end),
+                    "filter": fields[6],
+                    "imprecise": "IMPRECISE" in info,
+                }
+            )
+            record_counts[chrom] += 1
+    return {chrom: pd.DataFrame(chrom_rows) for chrom, chrom_rows in rows.items()}
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=Path("stage1_output/config.yaml"))
+    parser.add_argument("--out-dir", type=Path, default=Path("stage2_boundary_output"))
+    parser.add_argument("--boundary-distance-bp", type=int, default=None)
+    parser.add_argument("--max-sv-id-length", type=int, default=None)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    config_path = Path(args.config)
-    config = load_config(config_path)
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    boundary_bp = args.boundary_distance_bp if args.boundary_distance_bp is not None else config["thresholds"]["boundary_distance_bp"]
-
-    sv = pd.read_csv(config["paths"]["sv_calls"], sep="\t")
-    hb = pd.read_csv(config["paths"]["haploblocks"], sep="\t")
-
-    annotated = classify_sv_positions(sv, hb, boundary_bp)
-
-    counts = annotated["position_class"].value_counts()
-    log.info(
-        "Position classification (N=%dbp): within_block=%d boundary_crossing=%d outside_block=%d",
-        boundary_bp,
-        int(counts.get("within_block", 0)),
-        int(counts.get("boundary_crossing", 0)),
-        int(counts.get("outside_block", 0)),
+    config = yaml.safe_load(args.config.read_text())
+    chroms = list(config["paths"]["haploblocks"])
+    boundary_bp = (
+        args.boundary_distance_bp
+        if args.boundary_distance_bp is not None
+        else config["thresholds"]["boundary_distance_bp"]
     )
-    n_multi_block = (annotated["haploblock_id"].str.count(",") > 0).sum()
-    if n_multi_block:
-        log.info("%d SV(s) matched more than one haploblock (span a shared edge)", n_multi_block)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    annotated.to_csv(out_dir / "sv_calls.tsv", sep="\t", index=False)
-    hb.to_csv(out_dir / "haploblocks.tsv", sep="\t", index=False)
-    shutil.copy(config["paths"]["sample_metadata"], out_dir / "sample_metadata.tsv")
+    max_id_length = (
+        args.max_sv_id_length
+        if args.max_sv_id_length is not None
+        else config["settings"]["max_sv_id_length"]
+    )
+    sv_by_chrom = load_sv_metadata(Path(config["paths"]["vcf"]), chroms, max_id_length)
+    qc = {"boundary_distance_bp": boundary_bp, "chromosomes": {}}
+    for chrom in chroms:
+        haploblocks = pd.read_csv(config["paths"]["haploblocks"][chrom], sep="\t")
+        annotated = classify_sv_positions(sv_by_chrom[chrom], haploblocks, boundary_bp)
+        output_path = args.out_dir / f"boundary_svs.{chrom}.tsv"
+        annotated.to_csv(output_path, sep="\t", index=False)
+        counts = annotated["position_class"].value_counts().to_dict()
+        qc["chromosomes"][chrom] = {
+            "sv_records": len(annotated),
+            "position_class_counts": counts,
+            "output": str(output_path.resolve()),
+        }
+        log.info("%s: %s", chrom, counts)
 
-    stage2_config = dict(config)
-    stage2_config["paths"] = {
-        "sv_calls": str((out_dir / "sv_calls.tsv").resolve()),
-        "haploblocks": str((out_dir / "haploblocks.tsv").resolve()),
-        "sample_metadata": str((out_dir / "sample_metadata.tsv").resolve()),
-    }
-    with open(out_dir / "config.yaml", "w") as fh:
-        yaml.safe_dump(stage2_config, fh, sort_keys=False)
-
-    log.info("Wrote %d annotated SVs and %d haploblocks to %s", len(annotated), len(hb), out_dir.resolve())
-    log.info("Config written to %s", (out_dir / "config.yaml").resolve())
+    (args.out_dir / "boundary_qc.json").write_text(json.dumps(qc, indent=2) + "\n")
 
 
 if __name__ == "__main__":
