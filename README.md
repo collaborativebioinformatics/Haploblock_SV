@@ -15,10 +15,10 @@ Specifically, the workflow will:
 
 
 ## Contributors
-Jędrzej Kubica jedrzej.kubica@univ-grenoble-alpes.fr 
-Lynn Ly lynn.ly@nanoporetech.com
-Maria Fernanda Cardenas maria.cardenas@stjude.org
-Linh Nguyen nguyen.linh.1010@ku.edu
+- Jędrzej Kubica jedrzej.kubica@univ-grenoble-alpes.fr 
+- Lynn Ly lynn.ly@nanoporetech.com
+- Maria Fernanda Cardenas maria.cardenas@stjude.org
+- Linh Nguyen nguyen.linh.1010@ku.edu
 
 
 ## Flowchart
@@ -63,5 +63,8 @@ The pipeline is currently under active development
 # Results
 
 # Future steps
+
+- Generate Region-level FASTA including SNP and SV information to regenerate Clustering Haploblock with MMseqs2 and to confirm that the genomic hashes don't have any deviation with the ones originated previously 
+
 
 # References
