@@ -1,0 +1,17 @@
+##fileformat=VCFv4.2
+##source=Haploblock_SV_example_cohort
+##contig=<ID=chr21,length=46709983>
+##ALT=<ID=DEL,Description="Deletion">
+##ALT=<ID=INS,Description="Insertion">
+##ALT=<ID=INV,Description="Inversion">
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">
+##INFO=<ID=END,Number=1,Type=Integer,Description="End position of the variant">
+##INFO=<ID=SVLEN,Number=1,Type=Integer,Description="Difference in length between REF and ALT alleles">
+##INFO=<ID=IMPRECISE,Number=0,Type=Flag,Description="Imprecise structural variant">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SAMP_A	SAMP_B	SAMP_C
+chr21	10000001	EX_DEL_outside	N	<DEL>	.	.	SVTYPE=DEL;END=10001000;SVLEN=-999	GT	0/1	0/0	0/0
+chr21	14215001	EX_DEL_spanstart	N	<DEL>	.	.	SVTYPE=DEL;END=14216000;SVLEN=-999	GT	0/1	0/1	0/0
+chr21	14230001	EX_DEL_within	N	<DEL>	.	.	SVTYPE=DEL;END=14235000;SVLEN=-5000	GT	1|1	0|1	0/0
+chr21	14283501	EX_INV_imprecise	N	<INV>	.	.	SVTYPE=INV;END=14284600;IMPRECISE	GT	0/1	./.	0/1
+chr21	14300001	EX_INS_within	N	<INS>	.	.	SVTYPE=INS;END=14300001;SVLEN=320	GT	0/1	0/0	1/1

@@ -71,11 +71,26 @@ def test_cleaned_sv_calls_satisfy_filters(stage1_output, stage0_synthetic):
 
     sv = pd.read_csv(stage1_output / "sv_calls.tsv", sep="\t")
     assert len(sv) > 0
-    assert not sv["imprecise"].any()
+    # imprecise calls are KEPT by default (dropping them removes all inversions)
+    assert sv["imprecise"].any()
     in_range = sv["length"].isna() | sv["length"].between(thresholds["min_sv_length"], thresholds["max_sv_length"])
     assert in_range.all()
     assert (sv["start"] <= sv["end"]).all()
     assert not sv.duplicated(subset=["chrom", "start", "end", "sv_type", "length"]).any()
+
+
+def test_drop_imprecise_flag_removes_imprecise_calls(stage0_synthetic, tmp_path):
+    out_dir = tmp_path / "stage1_dropimprecise"
+    run(
+        STAGE1_SCRIPT,
+        ["--config", str(stage0_synthetic / "config.yaml"), "--out-dir", str(out_dir), "--drop-imprecise"],
+    )
+    sv = pd.read_csv(out_dir / "sv_calls.tsv", sep="\t")
+    assert len(sv) > 0
+    assert not sv["imprecise"].any()
+    with open(out_dir / "qc_report.json") as fh:
+        report = json.load(fh)
+    assert report["sv_calls"]["dropped_imprecise"] > 0
 
 
 def test_haploblocks_passed_through_unchanged(stage1_output, stage0_synthetic):

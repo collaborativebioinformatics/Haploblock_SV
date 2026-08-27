@@ -1,14 +1,14 @@
 {
   "sv_calls": {
     "input_rows": 50601,
-    "dropped_imprecise": 14198,
-    "rows_after_confidence_filter": 36403,
-    "dropped_out_of_size_range": 10,
+    "dropped_imprecise": 0,
+    "rows_after_confidence_filter": 50601,
+    "dropped_out_of_size_range": 31,
     "exempted_from_size_filter_unknown_length": 2,
-    "rows_after_size_filter": 36393,
+    "rows_after_size_filter": 50570,
     "coords_swapped": 0,
-    "exact_duplicates_removed": 30,
-    "output_rows": 36363
+    "exact_duplicates_removed": 612,
+    "output_rows": 49958
   },
   "haploblocks": {
     "input_rows": 39113,

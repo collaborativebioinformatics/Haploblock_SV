@@ -39,10 +39,15 @@ always UCSC-style ("chr1".."chr22", "chrX").
                        for INS this is NOT end-start (always ~1bp, an
                        insertion's reference *position*, not its size) but
                        a length recovered from supporting calls' SVLEN,
-                       NaN if no call resolved one), then one int column
-                       (0/1/2 dosage) per sample -- these column names
-                       match sample_metadata.tsv's sample_id values exactly
-                       (join key, not a fixed/known set of names).
+                       NaN if no call resolved one), then one column per
+                       sample -- column names match sample_metadata.tsv's
+                       sample_id values exactly (join key, not a fixed set
+                       of names). The per-sample cell is a 0/1/2 dosage int
+                       for the dbVar and synthetic paths, but the raw
+                       FORMAT/GT string ("0|1", "1/1", "./.") when the
+                       calls came from --vcf (a standard multi-sample VCF);
+                       downstream stages must handle both (a GT string that
+                       is all-numeric-and-separators vs. a bare int).
 
   haploblocks.tsv     haploblock_id (str), chrom (str), start (int),
                        end (int), n_snps (float, always NaN -- not published
@@ -56,9 +61,12 @@ always UCSC-style ("chr1".."chr22", "chrX").
                        data -- an actual differentiation score needs
                        population labels and belongs in Stage 6, not here).
 
-  sample_metadata.tsv sample_id (str), superpopulation (str, one of
-                       AFR/AMR/EAS/EUR/SAS, or UNKNOWN for a real dbVar
-                       sample id with no hardcoded population mapping).
+  sample_metadata.tsv sample_id (str), population (str -- the fine-grained
+                       label downstream stages group by; a 1000G population
+                       code like CHS/PUR/YRI where known, else UNKNOWN),
+                       superpopulation (str, one of AFR/AMR/EAS/EUR/SAS, or
+                       UNKNOWN). Stages 4/6/7 read `population`, never a
+                       hardcoded list of the five superpopulations.
 
 config.yaml also carries values Stage 1 (and later stages) should read
 rather than re-hardcode: genome_build (str), thresholds.af_common_threshold,
@@ -101,6 +109,11 @@ HGSVC_TRIO_SUPERPOPULATIONS = {
     "HG00512": "EAS", "HG00513": "EAS", "HG00514": "EAS",  # CHS trio
     "HG00731": "AMR", "HG00732": "AMR", "HG00733": "AMR",  # PUR trio
     "NA19238": "AFR", "NA19239": "AFR", "NA19240": "AFR",  # YRI trio
+}
+HGSVC_TRIO_POPULATIONS = {
+    "HG00512": "CHS", "HG00513": "CHS", "HG00514": "CHS",
+    "HG00731": "PUR", "HG00732": "PUR", "HG00733": "PUR",
+    "NA19238": "YRI", "NA19239": "YRI", "NA19240": "YRI",
 }
 
 
@@ -422,6 +435,69 @@ def load_real_sv_calls(vcf_path: Path) -> pd.DataFrame | None:
         return None
 
 
+def load_vcf_sv_calls(vcf_path: Path) -> pd.DataFrame | None:
+    """Parse a standard multi-sample SV VCF, keeping the raw FORMAT/GT string
+    ("0|1", "1/1", "./.") in one column per sample.
+
+    This is the --vcf path. Unlike load_real_sv_calls() (which collapses each
+    genotype to a 0/1/2 dosage), the literal GT is preserved so phasing and
+    missingness survive into sv_calls.tsv for Stage 4's per-population allele
+    frequencies. Records whose INFO/SVTYPE is not one of DEL/DUP/INV/INS are
+    skipped. Returns None (caller falls back) on any parse failure.
+    """
+    try:
+        from cyvcf2 import VCF
+    except ImportError:
+        log.warning("cyvcf2 not installed; cannot parse --vcf %s", vcf_path)
+        return None
+    try:
+        vcf = VCF(str(vcf_path))
+        sample_ids = list(vcf.samples)
+        if not sample_ids:
+            log.warning("--vcf %s declares no samples in its header", vcf_path)
+            return None
+        rows = []
+        n_skipped = 0
+        for variant in vcf:
+            svtype = variant.INFO.get("SVTYPE")
+            if svtype not in SV_TYPES:
+                n_skipped += 1
+                continue
+            start = variant.POS - 1  # VCF POS is 1-based; convert to 0-based half-open
+            end = variant.INFO.get("END", variant.POS)
+            svlen_field = variant.INFO.get("SVLEN")
+            try:
+                length = abs(int(svlen_field)) if svlen_field not in (None, ".") else abs(end - start)
+            except (TypeError, ValueError):
+                length = abs(end - start)
+            row = {
+                "sv_id": variant.ID or f"{variant.CHROM}_{variant.POS}_{svtype}",
+                "chrom": variant.CHROM,
+                "start": start,
+                "end": end,
+                "sv_type": svtype,
+                "imprecise": bool(variant.INFO.get("IMPRECISE", False)),
+                "length": float(length) if length and length > 0 else np.nan,
+            }
+            # cyvcf2 .genotypes: [allele_1, allele_2, ..., phased_bool]; -1 is a
+            # missing allele. Re-serialize to the familiar GT string form.
+            for sample_id, gt in zip(sample_ids, variant.genotypes):
+                *alleles, phased = gt
+                sep = "|" if phased else "/"
+                row[sample_id] = sep.join("." if a < 0 else str(a) for a in alleles)
+            rows.append(row)
+        if n_skipped:
+            log.warning("Skipped %d --vcf record(s) with unrecognized/missing SVTYPE", n_skipped)
+        if not rows:
+            log.warning("No usable SV records parsed from --vcf %s", vcf_path)
+            return None
+        log.info("Parsed %d SV record(s) across %d sample(s) from --vcf %s", len(rows), len(sample_ids), vcf_path)
+        return pd.DataFrame(rows)
+    except Exception as exc:  # noqa: BLE001 - best-effort parse, any failure -> caller falls back
+        log.warning("Failed to parse --vcf %s: %s", vcf_path, exc)
+        return None
+
+
 def _find_column(columns: list[str], candidates: list[str]) -> str | None:
     lower = {c.lower(): c for c in columns}
     for cand in candidates:
@@ -471,11 +547,16 @@ def load_real_sample_metadata(path: Path) -> pd.DataFrame | None:
         return None
     sample_col = _find_column(list(df.columns), ["sample", "sample_id", "sampleid"])
     superpop_col = _find_column(list(df.columns), ["super_pop", "superpop", "superpopulation"])
-    if not (sample_col and superpop_col):
-        log.warning("Sample metadata %s is missing sample/superpopulation columns", path)
+    pop_col = _find_column(list(df.columns), ["pop", "population"])
+    if not (sample_col and (superpop_col or pop_col)):
+        log.warning("Sample metadata %s is missing sample/(super)population columns", path)
         return None
+    superpop = df[superpop_col] if superpop_col else "UNKNOWN"
+    # `population` is what Stages 4/6/7 group by; fall back to the superpopulation
+    # label if the panel only carries the coarse grouping
+    population = df[pop_col] if pop_col else superpop
     return pd.DataFrame(
-        {"sample_id": df[sample_col], "superpopulation": df[superpop_col]}
+        {"sample_id": df[sample_col], "population": population, "superpopulation": superpop}
     )
 
 
@@ -584,9 +665,13 @@ def generate_synthetic_haploblocks(n_blocks: int, rng: np.random.Generator) -> p
 
 def generate_synthetic_samples(n_samples: int, rng: np.random.Generator) -> pd.DataFrame:
     superpops = [SUPERPOPULATIONS[i % len(SUPERPOPULATIONS)] for i in range(n_samples)]
+    # give each superpopulation two fake sub-populations so downstream code that
+    # groups by `population` is genuinely exercised on >5 groups
+    population = [f"{sp}{(i // len(SUPERPOPULATIONS)) % 2 + 1}" for i, sp in enumerate(superpops)]
     return pd.DataFrame(
         {
             "sample_id": [f"SAMP{i:04d}" for i in range(n_samples)],
+            "population": population,
             "superpopulation": superpops,
         }
     )
@@ -672,7 +757,7 @@ def build_config(args, out_dir: Path, sources_used: dict) -> dict:
             "min_sv_count_per_block": args.min_sv_count_per_block,
             "min_sv_length": args.min_sv_length,
             "max_sv_length": args.max_sv_length,
-            "drop_imprecise": not args.keep_imprecise,
+            "drop_imprecise": args.drop_imprecise,
         },
         "seeds": {
             "permutation_seed": args.seed,
@@ -688,7 +773,8 @@ def build_config(args, out_dir: Path, sources_used: dict) -> dict:
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--sv-source", default=None, help="Local path or URL to a single already-prepared SV VCF (overrides the dbVar auto-fetch below)")
+    p.add_argument("--vcf", default=None, help="Local path or URL to a standard multi-sample SV VCF (FORMAT/GT). Highest-priority SV source: builds sv_calls.tsv with the raw GT string per sample and derives sample_metadata.tsv from the VCF's sample list (population=UNKNOWN unless --panel-source is also given)")
+    p.add_argument("--sv-source", default=None, help="Local path or URL to a single already-prepared SV VCF, genotypes collapsed to 0/1/2 dosage (overrides the dbVar auto-fetch below; --vcf overrides this)")
     p.add_argument("--sv-genome-build", default="GRCh38", help="Genome build of --sv-source, if given")
     p.add_argument("--dbvar-base-url", default=DBVAR_BASE_URL, help="Directory containing <study>.<build>.variant_{call,region}.vcf.gz(.tbi)")
     p.add_argument("--dbvar-study", default="nstd152")
@@ -712,10 +798,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--min-sv-length", type=int, default=50, help="Stage 1's size filter floor, bp (50bp is the conventional SV-vs-indel cutoff)")
     p.add_argument("--max-sv-length", type=int, default=5_000_000, help="Stage 1's size filter ceiling, bp")
     p.add_argument(
-        "--keep-imprecise", action="store_true",
-        help="Keep IMPRECISE-flagged calls in Stage 1 instead of dropping them. dbVar never sets "
-        "VCF FILTER (always '.'), so IMPRECISE is the closest thing nstd152 has to a confidence flag "
-        "-- about 28%% of real nstd152 records carry it.",
+        "--drop-imprecise", action="store_true",
+        help="Set thresholds.drop_imprecise: true in the emitted config so Stage 1 drops "
+        "IMPRECISE-flagged calls. Off by default: callers flag nearly every inversion IMPRECISE, "
+        "so dropping imprecise calls silently removes all INV events.",
     )
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args(argv)
@@ -768,27 +854,59 @@ def main(argv=None) -> None:
         haploblocks = generate_synthetic_haploblocks(args.n_haploblocks, rng)
         sources_used["haploblocks"] = "synthetic"
 
-    # --- SV calls: manual --sv-source overrides the dbVar auto-fetch ---
+    # --- SV calls: --vcf (raw GT) > --sv-source (dosage) > dbVar auto-fetch ---
     sv_calls = None
-    sv_path = fetch_or_load(args.sv_source, out_dir, "sv_calls")
+    sv_from_vcf = False
+    if args.vcf:
+        vcf_path = fetch_or_load(args.vcf, out_dir, "sv_calls_vcf")
+        if vcf_path:
+            sv_calls = load_vcf_sv_calls(vcf_path)
+            if sv_calls is not None:
+                sv_calls = harmonize_build(sv_calls, args.sv_genome_build, args.target_genome_build, args.chain_file, "sv_calls")
+                sv_from_vcf = True
+        if sv_calls is None:
+            log.warning("--vcf %s yielded no usable calls; falling back to the other SV sources", args.vcf)
+
+    sv_path = None if sv_from_vcf else fetch_or_load(args.sv_source, out_dir, "sv_calls")
     if sv_path:
         sv_calls = load_real_sv_calls(sv_path)
         if sv_calls is not None:
             sv_calls = harmonize_build(sv_calls, args.sv_genome_build, args.target_genome_build, args.chain_file, "sv_calls")
-    elif not args.skip_dbvar_download:
+    elif not sv_from_vcf and not args.skip_dbvar_download:
         dbvar_paths = fetch_dbvar_study(args.dbvar_base_url, args.dbvar_study, args.dbvar_build, out_dir)
         if dbvar_paths:
             sv_calls = load_dbvar_sv_calls(dbvar_paths["call_vcf"], dbvar_paths["region_vcf"])
             if sv_calls is not None:
                 sv_calls = harmonize_build(sv_calls, args.dbvar_build, args.target_genome_build, args.chain_file, "sv_calls")
+    non_sample_cols = {"sv_id", "chrom", "start", "end", "sv_type", "imprecise", "length"}
     if sv_calls is not None:
-        log.info("Using real SV calls (%d records) from %s", len(sv_calls), args.sv_source or f"{args.dbvar_base_url} ({args.dbvar_study})")
-        sources_used["sv_calls"] = "real"
-        if sources_used["sample_metadata"] == "synthetic":
+        src_label = args.vcf if sv_from_vcf else (args.sv_source or f"{args.dbvar_base_url} ({args.dbvar_study})")
+        log.info("Using real SV calls (%d records) from %s", len(sv_calls), src_label)
+        sources_used["sv_calls"] = "real (--vcf)" if sv_from_vcf else "real"
+
+        if sv_from_vcf and sources_used["sample_metadata"] != "real":
+            # a plain VCF header gives sample ids but no population labels -- build
+            # sample_metadata from the ids in the VCF so the sample_id columns agree
+            # downstream; population is UNKNOWN until a --panel-source fills it in
+            observed_samples = [c for c in sv_calls.columns if c not in non_sample_cols]
+            samples = pd.DataFrame(
+                {
+                    "sample_id": observed_samples,
+                    "population": "UNKNOWN",
+                    "superpopulation": "UNKNOWN",
+                }
+            )
+            sources_used["sample_metadata"] = "from --vcf sample ids (population=UNKNOWN)"
+            log.warning(
+                "--vcf gave %d sample(s) but no population labels; sample_metadata.tsv's "
+                "population column is all UNKNOWN. Pass --panel-source to attach real "
+                "population labels -- Stages 4/6/7 group by that column.",
+                len(observed_samples),
+            )
+        elif sources_used["sample_metadata"] == "synthetic":
             # the synthetic sample panel's IDs (SAMPxxxx) won't match real dbVar sample
             # IDs (e.g. HG00512) -- rebuild sample_metadata from the IDs actually observed
             # in sv_calls so the two tables' sample_id columns agree downstream
-            non_sample_cols = {"sv_id", "chrom", "start", "end", "sv_type", "imprecise", "length"}
             observed_samples = [c for c in sv_calls.columns if c not in non_sample_cols]
             unknown = [s for s in observed_samples if s not in HGSVC_TRIO_SUPERPOPULATIONS]
             if unknown:
@@ -799,6 +917,7 @@ def main(argv=None) -> None:
             samples = pd.DataFrame(
                 {
                     "sample_id": observed_samples,
+                    "population": [HGSVC_TRIO_POPULATIONS.get(s, "UNKNOWN") for s in observed_samples],
                     "superpopulation": [HGSVC_TRIO_SUPERPOPULATIONS.get(s, "UNKNOWN") for s in observed_samples],
                 }
             )

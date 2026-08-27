@@ -9,7 +9,7 @@ thresholds:
   min_sv_count_per_block: 3
   min_sv_length: 50
   max_sv_length: 5000000
-  drop_imprecise: true
+  drop_imprecise: false
 seeds:
   permutation_seed: 42
   umap_seed: 42

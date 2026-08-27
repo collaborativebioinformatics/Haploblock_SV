@@ -2,9 +2,7 @@
 
 Ready-to-use prompts for an agentic coding assistant, organized by pipeline stage and by day (see `README.md` for the full plan). Each prompt is self-contained enough to hand to a fresh agent session — it restates the relevant context rather than assuming prior conversation.
 
-Shared context to paste into any session if it doesn't already have it: *"We're building a Python pipeline for a hackathon that studies structural variants (SVs: DEL/DUP/INV/INS) within 'haploblocks' — LD-defined haplotype-hash regions from data.haploblocks.org. SV calls come from dbVar study nstd152 (Chaisson et al. 2019, 1000 Genomes haplotype-resolved SVs). The pipeline is a sequence of independently-runnable, parameterized stages under `pipeline/`, each a script or module taking input paths and config values as CLI args or function args — never hardcoded paths. See README.md for the full stage list and PROMPTS.md for the stage you're implementing."*
-
-This is an example change for Maria to see.
+Shared context to paste into any session if it doesn't already have it: *"We're building a Python pipeline for a hackathon that studies structural variants (SVs: DEL/DUP/INV/INS) within 'haploblocks' — LD-defined haplotype-hash regions from data.haploblocks.org. SV calls come from dbVar study nstd152 (Chaisson et al. 2019), or from an arbitrary multi-sample SV VCF supplied to Stage 0 via `--vcf`. Population labels come from whatever is in `sample_metadata.tsv` (a `population` column) — never a hardcoded list of the five 1000G superpopulations. The pipeline is a sequence of independently-runnable, parameterized stages under `pipeline/`, each a script taking input paths and config values as CLI args — never hardcoded paths. Stages 0–2 are implemented; Stage 3 was removed (numbering keeps 4–9); Stages 4–9 are specs. See README.md for the full stage list."*
 
 ---
 
@@ -13,10 +11,14 @@ This is an example change for Maria to see.
 ### Stage 0: Data ingestion & harmonization
 
 **Implement:**
-> Write `pipeline/stage0_ingest.py`, a standalone script that: (1) downloads or accepts a local path to the dbVar nstd152 VCF (structural variants), (2) downloads or accepts a local path to haploblock BED/metadata and population-cluster labels from data.haploblocks.org, (3) downloads or accepts a local path to 1000 Genomes sample→superpopulation metadata (AFR/AMR/EAS/EUR/SAS), (4) confirms all inputs are on the same genome build (liftover to GRCh38 with `pyliftover` if not, logging a warning), and (5) writes one shared `config.yaml` capturing genome build, AF thresholds to be used later, boundary-distance threshold N (bp), random seeds for permutation/UMAP, and file paths — this config is read by every later stage, so its schema is the contract for the rest of the pipeline. Take all input paths/URLs as CLI args with sensible defaults, not hardcoded. If any real data source is slow or its schema is unclear, fall back to generating a small synthetic dataset (a few hundred fake SVs across a few dozen fake haploblocks with plausible fields) so downstream stages are never blocked — log clearly when running on synthetic vs. real data.
+> Write `pipeline/stage0_ingest.py`, a standalone script that: (1) obtains SV calls from one of, in priority order, `--vcf` (a standard multi-sample SV VCF with FORMAT/GT), `--sv-source` (a single prepared VCF), or an auto-fetch of the dbVar nstd152 call+region VCFs; (2) downloads or accepts a local path to haploblock boundaries from data.haploblocks.org; (3) obtains sample→population metadata from `--panel-source` if given, else derives it from the SV sample IDs; (4) confirms all coordinate inputs are on the same genome build (liftover to GRCh38 with `pyliftover` if a chain file is supplied, logging a warning otherwise); and (5) writes one shared `config.yaml` capturing genome build, thresholds (AF, boundary-distance N bp, size limits, `drop_imprecise`), seeds, and the three table paths — this config is the contract every later stage reads. All input paths/URLs are CLI args with sensible defaults, never hardcoded. Any real source that is slow, unreachable, or unparseable falls back to a small synthetic stand-in for just that input (logged clearly) so downstream stages are never blocked.
+>
+> For the `--vcf` path specifically: write `sv_calls.tsv` with **one column per sample holding the raw FORMAT/GT string** (`0|1`, `1/1`, `./.` — phasing and missingness preserved, unlike the 0/1/2 dosage the dbVar/synthetic paths write), and build `sample_metadata.tsv` from the VCF's sample list, with `population` = `UNKNOWN` unless `--panel-source` fills it in. `sample_metadata.tsv` always has `sample_id`, `population` (the fine-grained label Stages 4/6/7 group by), and `superpopulation` columns.
+>
+> `--drop-imprecise` sets `thresholds.drop_imprecise: true` in the emitted config; it is **off by default** because SV callers flag nearly every inversion IMPRECISE, so dropping imprecise calls removes all INV events.
 
 **Test:**
-> Write a small pytest test for `stage0_ingest.py` that runs it in synthetic-data mode (no network access) and asserts: `config.yaml` is created and parses as valid YAML with all expected keys (genome build, thresholds, seeds, paths), the SV table and haploblock table are non-empty pandas DataFrames with the expected columns, and sample metadata has superpopulation labels drawn from the standard five values.
+> Write pytest tests for `stage0_ingest.py`. In synthetic-data mode (no network): `config.yaml` parses as YAML with all expected keys (genome build, thresholds incl. `drop_imprecise`, seeds, paths), the SV and haploblock tables are non-empty DataFrames with the expected columns, and `sample_metadata.tsv` has `sample_id` / `population` / `superpopulation`. In `--vcf` mode against a tiny checked-in example VCF: every per-sample cell in `sv_calls.tsv` is a GT string (contains `/` or `|`), the INV record is retained with `imprecise=True`, `config.yaml` has `drop_imprecise: false`, and `sample_metadata.tsv` is built from the VCF header with `population` all `UNKNOWN`.
 
 **Wire to next stage:**
 > Confirm `stage0_ingest.py`'s output file paths (SV table, haploblock table, sample metadata, config.yaml) match exactly what `pipeline/stage1_qc.py` expects to read — if Stage 1 doesn't exist yet, write down the expected input contract (file names, formats, columns) as a short comment block at the top of `stage0_ingest.py` so Stage 1 can be implemented against it independently.
@@ -24,10 +26,12 @@ This is an example change for Maria to see.
 ### Stage 1: QC & normalization
 
 **Implement:**
-> Write `pipeline/stage1_qc.py`, a standalone script taking the raw SV table and haploblock table (paths from Stage 0's config.yaml) and: filtering SVs to PASS/high-confidence calls only, dropping SVs below/above configurable size thresholds (read from config.yaml), normalizing breakpoint coordinates (left-aligned, 0-based BED-style), deduplicating exact-duplicate calls, and validating the haploblock BED is sorted and non-overlapping (raise a clear error listing offending rows if not, rather than silently continuing). Output a cleaned SV table and cleaned haploblock table as parquet or TSV, plus a short QC report (counts before/after each filter) as a JSON or text file.
+> Write `pipeline/stage1_qc.py`, a standalone script taking the raw SV table and haploblock table (paths from Stage 0's config.yaml) and: dropping SVs below/above configurable size thresholds (read from config.yaml; rows with unresolvable length are exempted, not dropped), coordinate sanity-checks (`start <= end`), deduplicating exact-duplicate calls (key on `chrom,start,end,sv_type,length` — INS share a ~1bp interval so `length` must be in the key), and validating the haploblock BED is sorted and non-overlapping per chromosome (raise a clear error listing offending rows, not silently continuing). Output a cleaned SV table, the haploblock table copied through unchanged, a QC report (counts before/after each step) as JSON, and this stage's own `config.yaml` with `paths` repointed so Stage 2 can chain via `--config`.
+>
+> **IMPRECISE calls are kept by default.** A `--drop-imprecise` flag (and `thresholds.drop_imprecise` in the config) enables the stricter filter, but it is off by default: callers flag nearly every inversion IMPRECISE, so dropping imprecise calls silently removes all INV events. True reference-based left-alignment is out of scope — accept `--reference-fasta` but make it an explicit logged no-op.
 
 **Test:**
-> Write a pytest test for `stage1_qc.py` using a small hand-crafted SV table containing: one PASS call, one low-confidence call that should be dropped, one duplicate call, and one call below the minimum size threshold. Assert the output table retains only the one valid call and the QC report's counts match expectations exactly.
+> Write pytest tests for `stage1_qc.py` chaining off Stage 0's synthetic output. Assert: the QC report's before/after counts are internally consistent; with defaults, imprecise calls are **retained**; with `--drop-imprecise`, all imprecise calls are removed and `qc_report.json`'s `dropped_imprecise` is > 0; size-filtered and duplicate rows are gone; the haploblock table is passed through byte-for-byte; and an overlapping haploblock table makes the stage exit non-zero with the offending rows named.
 
 **Wire to next stage:**
 > Update `pipeline/stage2_intersect.py` (or its docstring/contract if not yet written) to read Stage 1's cleaned SV table and cleaned haploblock table as its inputs, and confirm the coordinate convention (0-based BED-style, as fixed in Stage 1) is documented and consistent between the two scripts.
@@ -35,50 +39,43 @@ This is an example change for Maria to see.
 ### Stage 2: SV × haploblock intersection
 
 **Implement:**
-> Write `pipeline/stage2_intersect.py` using `pybedtools` to intersect the QC'd SV table (as BED-like intervals) against the QC'd haploblock BED. For each SV, add a `position_class` column: `within_block` (fully contained), `boundary_crossing` (either breakpoint within N bp of a block edge — N read from config.yaml — but not fully outside), or `outside_block`. Also add a `haploblock_id` column (or a list, if an SV can touch multiple blocks) linking each SV back to the block(s) it overlaps. Output one annotated SV table (parquet/TSV) that is the shared input for all downstream stages. Take all paths as CLI args, not hardcoded.
+> Write `pipeline/stage2_intersect.py` (pure Python/numpy — no bedtools/pybedtools) that intersects the QC'd SV table with the predefined haploblock BED. **For each SV, check it against every haploblock on its chromosome** with a plain vectorised interval comparison (an `[n_sv, n_block]` boolean grid) — no sorted-search window that could drop a match if block order were ever off. Add `position_class`: `within_block` (fully contained in exactly one block, ≥ N bp from both its edges — N from config.yaml), `boundary_crossing` (overlaps >1 block, or is contained but within N bp of an edge, or is within N bp of a block without overlapping it), or `outside_block` (no block on the chromosome within N bp). Add `haploblock_id` (comma-joined if it touches more than one block). Still re-validate the haploblock table as sorted/non-overlapping defensively, but do not let the classification depend on ordering.
+>
+> Haploblocks are contiguous *within the span they cover* but do not reach the telomeres/centromere, so `outside_block` SVs are expected (telomeric calls). Log an `outside_block` breakdown — `before_first_block` / `after_last_block` / `in_inter_block_gap` / `no_blocks_on_chrom` — so a non-zero `in_inter_block_gap` (a real hole in the haploblock table) is visible rather than hidden. Output one annotated SV table (TSV) that is the shared input for downstream stages; take all paths as CLI args.
 
 **Test:**
-> Write a pytest test for `stage2_intersect.py` with a synthetic haploblock (e.g. chr1:1000-2000) and three synthetic SVs: one fully inside (expect `within_block`), one straddling the 2000 boundary within N bp (expect `boundary_crossing`), and one far away on chr1 (expect `outside_block`). Assert the output `position_class` column matches exactly for all three.
+> Write pytest tests for `stage2_intersect.py` with a hand-crafted tiny table (two adjacent blocks + a lone block on another chromosome) covering `within_block`, `boundary_crossing` (both the "spans two blocks" and "near one edge" cases), and `outside_block` (far from any block, and a chromosome with no blocks). Also assert the `outside_block` breakdown log reports the right `before_first_block` / `after_last_block` / `in_inter_block_gap=0` / `no_blocks_on_chrom` counts on a table whose blocks start well after coordinate 0.
 
 **Wire to next stage:**
-> Confirm the annotated SV table's schema (columns: SV id, type, chrom, start, end, haploblock_id, position_class, sample genotype columns) is exactly what Stage 3 (boundary enrichment) and Stage 4 (AF classification) both need, since they read this same table independently — document the schema as a comment block at the top of `stage2_intersect.py`.
+> Confirm the annotated SV table's schema (SV id, type, chrom, start, end, haploblock_id, position_class, per-sample genotype columns) is exactly what Stage 4 (AF classification) needs — document it as a comment block at the top of `stage2_intersect.py`, including that per-sample cells may be GT strings (from `--vcf`) or dosage ints.
 
 ---
 
-## Day 2 (Aug 26) — Stages 3–5
+## Day 2 (Aug 26) — Stages 4–5
 
-### Stage 3: Boundary enrichment test
-
-**Implement:**
-> Write `pipeline/stage3_boundary_enrichment.py` that reads Stage 2's annotated SV table and tests whether `boundary_crossing` SVs are enriched relative to a null model. Implement the null as a circular rotation of SV positions within each chromosome (shift all SV coordinates on a chromosome by a random offset, wrapping around chromosome length, preserving intra-chromosome SV spacing/clustering while breaking their specific alignment to haploblock boundaries) — repeat for a configurable number of permutations (default 1000, seed from config.yaml) to build an empirical null distribution for the count of boundary-crossing SVs, and report an empirical p-value. Also implement a lightweight spatial-hotspot check: nearest-neighbor distance between consecutive SV breakpoints within each haploblock, compared to the expectation under a homogeneous Poisson process of the same intensity, reported as a z-score or KS-test p-value per block. Output a results table/report with both statistics.
-
-**Test:**
-> Write a pytest test for `stage3_boundary_enrichment.py` using two synthetic scenarios: (1) SVs placed exactly at random positions (should NOT show significant boundary enrichment, p > 0.05), and (2) SVs deliberately placed at every haploblock boundary (should show strong significant enrichment, p < 0.01). Fix the random seed and assert both outcomes.
-
-**Wire to next stage:**
-> No direct handoff needed for Stage 4 (it reads Stage 2's output independently), but confirm Stage 3's output is written to a path Stage 9 (integration) can later read for the summary report, and note that path in a shared `outputs.md` or in each stage's docstring.
+> Stage 3 (boundary enrichment test) was removed from the pipeline — see README.md "Descoped / future steps". Stage numbers below are unchanged (4–9) so these prompts and the README stay aligned.
 
 ### Stage 4: Common vs. population-specific SV classification
 
 **Implement:**
-> Write `pipeline/stage4_classify_af.py` that reads Stage 2's annotated SV table (with per-sample genotype columns) and Stage 0's sample→superpopulation metadata, computes allele frequency per SV within each of the five standard 1000 Genomes superpopulations (AFR/AMR/EAS/EUR/SAS — NOT the data.haploblocks.org clusters, to avoid circularity with Stage 6), and classifies each SV as `common` (AF above a configurable threshold, default 0.05, in ≥2 superpopulations) or `population_specific` (AF above threshold in exactly one superpopulation, near-zero elsewhere) or `other` (doesn't meet either definition — log the fraction falling here). Add `sv_class` and `specific_to_population` (nullable) columns to the SV table and write it out.
+> Write `pipeline/stage4_classify_af.py` that reads Stage 2's annotated SV table (per-sample genotype columns — handle both GT strings like `0|1` and 0/1/2 dosage ints) and `sample_metadata.tsv`, and computes allele frequency per SV **within each population present in `sample_metadata.tsv`'s `population` column** — do not hardcode the five 1000G superpopulations, and do not use the data.haploblocks.org clusters here (that would make Stage 6 circular). For each `(sv_id, sv_type, haploblock_id)` emit the per-population AF and a category: `common` (AF ≥ a configurable threshold, default 0.05, in ≥ 2 populations), `specific_to_population` (AF ≥ threshold in exactly one population, near-zero elsewhere — record which population), or `other` (neither — typically too few samples in the relevant populations to tell; log the fraction here). Write the result as a tidy table.
 
 **Test:**
-> Write a pytest test with a synthetic 3-SV, 2-superpopulation genotype matrix: one SV common to both populations, one private to population A only, one rare/absent everywhere. Assert the classification (`common`, `population_specific` with correct population, `other`) matches for all three at the default threshold.
+> Write a pytest test with a synthetic 3-SV, 2-population genotype matrix: one SV common to both populations, one private to population A, one rare/absent everywhere. Assert the category (`common`, `specific_to_population` with the correct population, `other`) matches for all three at the default threshold, and that the per-population AF columns are correct.
 
 **Wire to next stage:**
-> Confirm Stage 6 (population-cluster correlation) and Stage 8 (DUP/INV overlay) both read the `sv_class`/`specific_to_population` columns added here, and that Stage 6 never reads data.haploblocks.org cluster labels from this script — only from its own separate input — to preserve the independence needed for a non-circular correlation test.
+> Confirm Stage 6 (population-cluster correlation) and Stage 8 (DUP/INV overlay) both read the category / `specific_to_population` columns added here, and that Stage 6 gets its SNV-based cluster labels only from its own separate input, never from this script.
 
-### Stage 5: Per-haploblock SV-type enrichment (with block-architecture offset)
+### Stage 5: Per-haploblock SV-type enrichment
 
 **Implement:**
-> Write `pipeline/stage5_type_enrichment.py` that builds a per-haploblock × SV-type count matrix from Stage 2's output, joins in block length and SNP density from Stage 0's haploblock metadata, and fits a Poisson (or negative-binomial, if overdispersed — check with a dispersion test and switch automatically) regression per SV type with `log(block_length)` as an offset and SNP density as a covariate, testing whether each block's observed count deviates from the size-adjusted expectation. Apply Benjamini-Hochberg FDR correction across all block×type tests. Before testing, drop haploblock×type combinations with fewer than a configurable minimum SV count (default 3) and report what fraction of blocks were excluded as underpowered. Output a results table: haploblock_id, sv_type, observed count, expected count, p-value, FDR-adjusted q-value, flagged (q < 0.05).
+> Write `pipeline/stage5_type_enrichment.py` that builds a per-haploblock × SV-type count matrix from Stage 2's output. For each SV type, calculate the overall SV rate across all haploblocks as the total number of SVs of that type divided by the total haploblock length. For each haploblock, calculate the expected number of SVs of that type based on its length and the overall SV rate. Use a Poisson test to determine whether the observed SV count significantly deviates from the expected count. Apply Benjamini-Hochberg FDR correction across all haploblock × SV-type tests. Flag combinations with an FDR-adjusted q-value below 0.05. Output a results table: `haploblock_id, sv_type, observed_count, expected_count, p_value, q_value, flagged`.
 
 **Test:**
-> Write a pytest test with synthetic data: several haploblocks of varying length with SV counts proportional to length (should show no significant enrichment after offset correction), plus one haploblock with an artificially inflated count for one SV type (should be flagged as significant after FDR correction). Assert the artificially-inflated block is flagged and the proportional ones are not.
+> Write a pytest test with synthetic data: several haploblocks of varying length with SV counts proportional to length (should NOT be flagged after the length adjustment), plus one haploblock with an artificially inflated count for one SV type (should be flagged after FDR correction). Assert the inflated block×type is flagged and the proportional ones are not, at a fixed seed.
 
 **Wire to next stage:**
-> Confirm Stage 9 (integration) reads this stage's flagged-haploblock table to build the "haploblocks prone to a particular SV type" section of the final report, and confirm the minimum-count exclusion fraction is surfaced there too as a documented limitation, not silently dropped.
+> Confirm Stage 9 (integration) reads this stage's flagged table to build the "haploblocks prone / resistant to a particular SV type" section of the final report.
 
 ---
 
@@ -87,45 +84,45 @@ This is an example change for Maria to see.
 ### Stage 6: Population-cluster correlation
 
 **Implement:**
-> Write `pipeline/stage6_cluster_correlation.py` that reads Stage 4's classified SV table and computes, per haploblock, a population-specific-SV density (e.g. count of population-specific SVs / total SVs, or / block length). Separately read data.haploblocks.org's per-haploblock cluster labels/differentiation metric (from Stage 0's output) and compute a correlation (Spearman, since the relationship needn't be linear) between the two per-block quantities, with a permutation-based p-value (shuffle block labels, default 1000 permutations). Output the correlation coefficient, p-value, and a per-block table for plotting.
+> Write `pipeline/stage6_cluster_correlation.py` that evaluates how well Stage 4's `specific_to_population` SV classifications correspond to the SNV-based population clusters already published for these haploblocks. Add a `--clusters` flag that builds a per-haploblock cluster table from a data.haploblocks.org clusters file (a local path or URL; ideally fetched once in Stage 0 and pointed at here). Per haploblock, compute a population-specific-SV density (count of `specific_to_population` SVs / total SVs, or / block length) and compare it against the cluster table's per-block differentiation quantity with a Spearman correlation and a permutation p-value (shuffle block labels, default 1000 permutations, seed from config.yaml). Output the correlation coefficient, p-value, and a per-block table for plotting.
 
 **Test:**
-> Write a pytest test with synthetic data where population-specific-SV density is constructed to be a noisy linear function of a synthetic cluster-differentiation score; assert the computed Spearman correlation is positive and significant (p < 0.05) at a fixed seed, and a shuffled-label negative control on the same data is not significant.
+> Write a pytest test with synthetic data where population-specific-SV density is a noisy monotonic function of a synthetic per-block cluster score; assert the Spearman correlation is positive and significant (p < 0.05) at a fixed seed, and that a shuffled-label negative control on the same data is not significant.
 
 **Wire to next stage:**
-> Confirm Stage 9 reads this stage's correlation coefficient/p-value and per-block table to render the population-correlation section of the report; note in a comment whether the sign/magnitude found matches or contradicts H3's expectation, so the report can state the finding plainly.
+> Confirm Stage 9 reads this stage's correlation coefficient/p-value and per-block table to render the population-correlation section of the report.
 
 ### Stage 7: SV-based population structure reconstruction
 
 **Implement:**
-> Write `pipeline/stage7_sv_clustering.py` that builds a per-sample × per-haploblock SV presence/absence (or dosage) matrix from Stage 2's output and genotype columns, runs PCA (via scikit-learn) and UMAP (via umap-learn, fixed `random_state` from config.yaml) for dimensionality reduction, clusters the reduced embedding (e.g. k-means or HDBSCAN), and computes Adjusted Rand Index between the resulting clusters and (a) 1000 Genomes superpopulation labels and (b) data.haploblocks.org's own hash-based clusters. Output the embedding coordinates, cluster assignments, and both ARI scores.
+> Write `pipeline/stage7_sv_clustering.py` that builds a per-sample × per-haploblock SV presence/absence (or dosage) matrix from Stage 2's output and genotype columns, runs PCA (scikit-learn) and UMAP (umap-learn, fixed `random_state` from config.yaml), and clusters the reduced embedding (e.g. k-means or HDBSCAN). **Output only: PNG PCA and UMAP plots (points colored by the `population` labels from `sample_metadata.tsv`), plus a cluster-assignments table (`sample_id, pca_cluster, umap_cluster`).** Formal cluster-agreement statistics (ARI vs. populations and vs. the haploblocks.org hash clusters) are a follow-up — see README.md "Descoped / future steps".
 
 **Test:**
-> Write a pytest test with a small synthetic SV matrix constructed so that two groups of samples have clearly distinct SV profiles (e.g. disjoint sets of population-specific SVs); assert the resulting clustering recovers the two groups with ARI > 0.8 against the known synthetic group labels, at a fixed seed.
+> Write a pytest test with a small synthetic SV matrix where two groups of samples have clearly distinct SV profiles; assert the clustering recovers the two groups (each synthetic group maps predominantly to one cluster label) at a fixed seed, and that the expected PNG files and the cluster-assignments table are written.
 
 **Wire to next stage:**
-> Confirm Stage 9 reads both ARI scores and the embedding coordinates to render a scatter plot (colored by superpopulation, and separately by haploblocks.org cluster) in the final report, and flag prominently if the ARI against superpopulations is much higher than against haploblocks.org clusters (or vice versa) since that's a key H6 finding either way.
+> Confirm Stage 9 can read the cluster-assignments table and embed the PNGs in the final report.
 
-### Stage 8: Duplication/inversion gene & selection overlay
+### Stage 8: Duplication/inversion gene overlay
 
 **Implement:**
-> Write `pipeline/stage8_dup_inv_overlay.py` that filters Stage 4's classified SV table to DUP and INV calls, identifies recurrent ones (present in multiple samples) and population-specific ones, and overlaps them against a gene annotation GTF (via `pyranges`/`gtfparse`) to report which genes each recurrent/population-specific DUP or INV overlaps. Output a ranked table (by recurrence count, then by population specificity) of "stand-out" DUP/INV calls with overlapping gene names — this is the core, always-in-scope part. As a clearly separate optional function `add_selection_scan_overlay()` (Stage 8b, stretch goal, skip if out of time), cross-reference the same calls against a selection-scan region file (e.g. PopHumanScan BED) if one is available, adding a `near_selection_signal` boolean column.
+> Write `pipeline/stage8_dup_inv_overlay.py` that filters Stage 4's classified SV table to DUP and INV calls, identifies recurrent ones (present in multiple samples) and `specific_to_population` ones, and overlaps them against a gene annotation GTF (via `pyranges`/`gtfparse`) to report which genes each recurrent / population-specific DUP or INV overlaps. Output a ranked table (by recurrence count, then by population specificity) of "stand-out" DUP/INV calls with overlapping gene names. (A selection-scan overlay is a follow-up — see README.md "Descoped / future steps".)
 
 **Test:**
-> Write a pytest test with a synthetic DUP/INV table and a tiny synthetic GTF (2-3 genes at known coordinates); assert the gene-overlap output correctly attributes each synthetic SV to the gene(s) it overlaps and correctly excludes the ones that don't overlap any gene.
+> Write a pytest test with a synthetic DUP/INV table and a tiny synthetic GTF (2-3 genes at known coordinates); assert the gene-overlap output correctly attributes each synthetic SV to the gene(s) it overlaps and excludes the ones that don't overlap any gene.
 
 **Wire to next stage:**
-> Confirm Stage 9 reads this stage's ranked DUP/INV table for the report section specifically called out for Maria (duplications) and Alistair (inversions), and that the table is sorted/filterable by SV type so each of them can look at just their type of interest.
+> Confirm Stage 9 reads this stage's ranked DUP/INV table for the report section called out for Maria (duplications) and Alistair (inversions), sorted/filterable by SV type.
 
 ---
 
 ## Final section: integration, documentation, and demo
 
 **Integration test:**
-> Write an end-to-end integration test (e.g. `tests/test_integration.py` or a shell script `run_pipeline.sh`) that runs Stages 0 through 9 in sequence on synthetic data for a single chromosome, asserts each stage's expected output file exists and is non-empty, and asserts the final Stage 9 summary table has exactly one row per haploblock with all expected columns populated (no unexpected nulls). This should run in under a few minutes so it can be re-run after every change.
+> Write an end-to-end integration test (e.g. `tests/test_integration.py` or a shell script `run_pipeline.sh`) that runs the retained stages (0, 1, 2, then 4–9) in sequence on synthetic data for a single chromosome, asserts each stage's expected output file exists and is non-empty, and asserts the final Stage 9 summary table has exactly one row per haploblock with all expected columns populated (no unexpected nulls). This should run in under a few minutes so it can be re-run after every change.
 
 **Documentation:**
 > Review `README.md`'s pipeline overview table against the actual `pipeline/` scripts as implemented, and update either the README or the code so stage names, inputs, and outputs match exactly. Add a `--help` docstring/argparse description to every stage script consistent with the README's one-line purpose for that stage.
 
 **Demo / report:**
-> Write `pipeline/stage9_integrate.py` that aggregates all prior stages' output tables into one per-haploblock summary (SV-type composition, boundary-enrichment flag, population-specificity density, cluster-correlation value, top DUP/INV hits) and renders it as a Jupyter notebook or a static HTML report (via Jinja2 + matplotlib/seaborn plots) — one figure per hypothesis (boundary enrichment histogram, per-block type-enrichment heatmap, population-correlation scatter, SV-based clustering scatter colored by both label sets, DUP/INV ranked table). If time allows, wrap the summary table in a minimal web view (e.g. a single-page app or a simple Flask/FastAPI endpoint) that lets a user query one haploblock ID and see its full SV profile, as a stretch extension of haploblocks.org itself.
+> Write `pipeline/stage9_integrate.py` that aggregates all prior stages' output tables into one per-haploblock summary (SV-type composition, per-type enrichment flag, population-specificity density, cluster-correlation value, top DUP/INV hits) and renders it as a Jupyter notebook or a static HTML report (via Jinja2 + matplotlib/seaborn plots) — one figure per question (per-block type-enrichment heatmap, population-correlation scatter, SV-based PCA/UMAP scatter colored by population, DUP/INV ranked table).

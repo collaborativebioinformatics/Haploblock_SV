@@ -13,7 +13,12 @@ and:
 Confidence filter, note: dbVar never sets VCF QUAL/FILTER (both are always
 "." in nstd152) -- there is no PASS/FAIL field to filter on. The closest
 thing nstd152 has to a confidence flag is INFO/IMPRECISE (~28% of real
-records), so that is what "high-confidence calls only" means here.
+records). IMPRECISE-flagged calls are KEPT by default: most SV callers
+flag essentially every inversion (and many insertions) IMPRECISE because
+their breakpoints are fuzzy, so dropping imprecise calls silently removes
+all INV events -- which is wrong for a study of SV *type* distribution.
+Pass --drop-imprecise (or set thresholds.drop_imprecise: true in the
+config) to opt back into the stricter filter.
 
 Dedup key, note: naively deduping on (chrom, start, end, sv_type) is wrong
 for INS -- dbVar represents every insertion as a ~1bp reference interval
@@ -184,7 +189,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--out-dir", default="stage1_output", help="Output directory for cleaned tables, qc_report.json, and this stage's own config.yaml")
     p.add_argument("--min-sv-length", type=int, default=None, help="Overrides config.yaml's thresholds.min_sv_length")
     p.add_argument("--max-sv-length", type=int, default=None, help="Overrides config.yaml's thresholds.max_sv_length")
-    p.add_argument("--keep-imprecise", action="store_true", help="Keep IMPRECISE-flagged calls even if config.yaml's thresholds.drop_imprecise is true")
+    p.add_argument("--drop-imprecise", action="store_true", help="Drop IMPRECISE-flagged calls. Off by default: callers flag nearly all inversions IMPRECISE, so dropping them removes every INV. Overrides config.yaml's thresholds.drop_imprecise when set")
     p.add_argument("--reference-fasta", default=None, help="Reference FASTA for left-alignment (not yet implemented -- see normalize_sv_coordinates())")
     return p.parse_args(argv)
 
@@ -200,7 +205,7 @@ def main(argv=None) -> None:
     thresholds = config["thresholds"]
     min_sv_length = args.min_sv_length if args.min_sv_length is not None else thresholds["min_sv_length"]
     max_sv_length = args.max_sv_length if args.max_sv_length is not None else thresholds["max_sv_length"]
-    drop_imprecise = bool(thresholds.get("drop_imprecise", True)) and not args.keep_imprecise
+    drop_imprecise = bool(thresholds.get("drop_imprecise", False)) or args.drop_imprecise
 
     sv = pd.read_csv(config["paths"]["sv_calls"], sep="\t")
     hb = pd.read_csv(config["paths"]["haploblocks"], sep="\t")

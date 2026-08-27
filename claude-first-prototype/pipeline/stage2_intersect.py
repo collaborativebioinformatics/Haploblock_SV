@@ -10,18 +10,26 @@ chromosome:
   boundary_crossing  overlaps more than one block (crosses a shared edge
                      between two blocks), OR is fully contained in one
                      block but within N bp of an edge, OR does not overlap
-                     any block but lies within N bp of one (a near-miss,
-                     relevant for e.g. a haploblock table with gaps -- real
-                     data.haploblocks.org blocks observed so far are
-                     contiguous, so this case mostly only fires at the very
-                     start/end of a chromosome's covered span).
+                     any block but lies within N bp of one.
   outside_block      no block on the SV's chromosome is within N bp at all.
 
-No bedtools/pybedtools: haploblocks are non-overlapping within a
-chromosome (Stage 1 enforces this; Stage 2 re-validates it defensively
-since it depends on that invariant and must stay independently runnable),
-so per chromosome this reduces to a sorted 1D interval search done here
-with numpy.searchsorted, not a general-purpose interval-join library.
+How the matching is done: for each chromosome, every SV is checked against
+*every* haploblock on that chromosome with a plain vectorised interval
+comparison (numpy broadcasting) -- no bedtools/pybedtools, and no clever
+sorted-search window that could drop a match if the block order were ever
+off. Haploblocks are still re-validated as sorted and non-overlapping
+(Stage 1 enforces it; Stage 2 re-checks defensively since it is
+independently runnable), but correctness of the classification no longer
+depends on that ordering.
+
+On `outside_block`: real data.haploblocks.org blocks are contiguous *within
+the span they cover* (no inter-block gaps), but that span does not reach
+the telomeres/centromere -- e.g. chr21's blocks span ~14.2-46.2 Mb. An SV
+before the first block or after the last block on its chromosome is
+therefore legitimately `outside_block`; it is not a matching bug. Stage 2
+logs a breakdown (before-span / after-span / in an inter-block gap / on a
+chromosome with no blocks at all) so a genuine gap problem would be
+visible rather than hidden among the expected telomeric calls.
 
 Output contract for pipeline/stage3_boundary_enrichment.py and
 pipeline/stage4_classify_af.py (neither implemented yet): same TSV/columns
@@ -83,60 +91,69 @@ def _validate_sorted_nonoverlapping(chrom: str, starts: np.ndarray, ends: np.nda
 
 
 def classify_sv_positions(sv: pd.DataFrame, hb: pd.DataFrame, boundary_bp: int) -> pd.DataFrame:
-    """Return sv with `position_class` and `haploblock_id` columns added."""
+    """Return sv with `position_class` and `haploblock_id` columns added.
+
+    Per chromosome, every SV is compared against every haploblock on that
+    chromosome (numpy broadcasting: an [n_sv, n_block] boolean grid). No
+    sorted-search shortcut, so the result cannot depend on block ordering.
+    """
     position_class = np.full(len(sv), "outside_block", dtype=object)
     haploblock_id = np.full(len(sv), "", dtype=object)
+    outside_reason = np.full(len(sv), "no_blocks_on_chrom", dtype=object)
 
     for chrom, hb_group in hb.groupby("chrom", sort=False):
         hb_group = hb_group.sort_values("start")
-        starts = hb_group["start"].to_numpy()
-        ends = hb_group["end"].to_numpy()
-        ids = hb_group["haploblock_id"].to_numpy()
-        _validate_sorted_nonoverlapping(chrom, starts, ends)
+        bs = hb_group["start"].to_numpy()
+        be = hb_group["end"].to_numpy()
+        bid = hb_group["haploblock_id"].to_numpy()
+        _validate_sorted_nonoverlapping(chrom, bs, be)
 
         sv_mask = (sv["chrom"] == chrom).to_numpy()
         if not sv_mask.any():
             continue
-        sv_starts = sv.loc[sv_mask, "start"].to_numpy()
-        sv_ends = sv.loc[sv_mask, "end"].to_numpy()
+        ss = sv.loc[sv_mask, "start"].to_numpy()[:, None]  # [n_sv, 1]
+        se = sv.loc[sv_mask, "end"].to_numpy()[:, None]
 
-        # candidate block index range per SV, widened by N so near-misses aren't missed
-        idx_lo = np.searchsorted(ends, sv_starts - boundary_bp, side="left")
-        idx_hi = np.searchsorted(starts, sv_ends + boundary_bp, side="right") - 1
+        overlaps = (ss < be[None, :]) & (se > bs[None, :])
+        contained = (bs[None, :] <= ss) & (se <= be[None, :])
+        far_from_both_edges = (ss - bs[None, :] >= boundary_bp) & (be[None, :] - se >= boundary_bp)
+        left_gap = ss - be[None, :]          # >0 when the block sits left of the SV
+        right_gap = bs[None, :] - se         # >0 when the block sits right of the SV
+        near = ~overlaps & (
+            ((left_gap >= 0) & (left_gap < boundary_bp))
+            | ((right_gap >= 0) & (right_gap < boundary_bp))
+        )
 
-        chrom_classes = np.full(sv_mask.sum(), "outside_block", dtype=object)
-        chrom_block_ids = np.full(sv_mask.sum(), "", dtype=object)
-        for row_i, (s, e, lo, hi) in enumerate(zip(sv_starts, sv_ends, idx_lo, idx_hi)):
-            if lo > hi:
-                continue  # no candidate block within N bp on this chromosome
-            relevant = []
-            fully_contained_far_from_edges = None
-            for j in range(lo, hi + 1):
-                b_start, b_end, b_id = starts[j], ends[j], ids[j]
-                overlaps = s < b_end and e > b_start
-                if overlaps:
-                    relevant.append(b_id)
-                    contained = b_start <= s and e <= b_end
-                    if contained and (s - b_start) >= boundary_bp and (b_end - e) >= boundary_bp:
-                        fully_contained_far_from_edges = b_id
-                else:
-                    gap = (b_start - e) if b_start >= e else (s - b_end)
-                    if 0 <= gap < boundary_bp:
-                        relevant.append(b_id)
-            if not relevant:
-                continue
-            if len(relevant) == 1 and fully_contained_far_from_edges is not None:
-                chrom_classes[row_i] = "within_block"
-            else:
-                chrom_classes[row_i] = "boundary_crossing"
-            chrom_block_ids[row_i] = ",".join(relevant)
+        relevant = overlaps | near                       # blocks this SV is "attached" to
+        clean_within = overlaps & contained & far_from_both_edges
+        n_relevant = relevant.sum(axis=1)
+
+        chrom_classes = np.where(
+            n_relevant == 0,
+            "outside_block",
+            np.where((n_relevant == 1) & clean_within.any(axis=1), "within_block", "boundary_crossing"),
+        ).astype(object)
+        chrom_block_ids = np.array(
+            [",".join(bid[row]) for row in relevant], dtype=object
+        )
+
+        # why is an outside_block SV outside? (blocks exist on this chromosome)
+        span_lo, span_hi = bs.min(), be.max()
+        se_flat, ss_flat = se[:, 0], ss[:, 0]
+        chrom_reason = np.where(
+            se_flat <= span_lo, "before_first_block",
+            np.where(ss_flat >= span_hi, "after_last_block", "in_inter_block_gap"),
+        ).astype(object)
 
         position_class[sv_mask] = chrom_classes
         haploblock_id[sv_mask] = chrom_block_ids
+        outside_reason[sv_mask] = chrom_reason
 
     out = sv.copy()
     out["position_class"] = position_class
     out["haploblock_id"] = haploblock_id
+    # scratch column: logged as a breakdown in main(), then dropped before writing
+    out["_outside_reason"] = outside_reason
     return out
 
 
@@ -173,6 +190,27 @@ def main(argv=None) -> None:
     n_multi_block = (annotated["haploblock_id"].str.count(",") > 0).sum()
     if n_multi_block:
         log.info("%d SV(s) matched more than one haploblock (span a shared edge)", n_multi_block)
+
+    outside = annotated.loc[annotated["position_class"] == "outside_block", "_outside_reason"]
+    if len(outside):
+        reasons = outside.value_counts()
+        log.info(
+            "outside_block breakdown: before_first_block=%d after_last_block=%d "
+            "in_inter_block_gap=%d no_blocks_on_chrom=%d",
+            int(reasons.get("before_first_block", 0)),
+            int(reasons.get("after_last_block", 0)),
+            int(reasons.get("in_inter_block_gap", 0)),
+            int(reasons.get("no_blocks_on_chrom", 0)),
+        )
+        n_gap = int(reasons.get("in_inter_block_gap", 0))
+        if n_gap:
+            log.warning(
+                "%d SV(s) fell in an inter-block gap -- data.haploblocks.org blocks are "
+                "expected to be contiguous within their span, so a non-zero count here points "
+                "at a real gap in the haploblock table, not just telomeric SVs",
+                n_gap,
+            )
+    annotated = annotated.drop(columns="_outside_reason")
 
     annotated.to_csv(out_dir / "sv_calls.tsv", sep="\t", index=False)
     hb.to_csv(out_dir / "haploblocks.tsv", sep="\t", index=False)

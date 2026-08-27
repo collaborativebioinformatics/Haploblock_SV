@@ -126,6 +126,46 @@ def test_outside_block_no_haploblocks_on_chromosome(handcrafted_output):
     assert row["position_class"] == "outside_block"
 
 
+def test_outside_block_breakdown_is_logged(tmp_path):
+    """The handcrafted set has one SV before chr1's block span (sv_far) and one
+    on a chromosome with no blocks (sv_no_chrom); the breakdown log must
+    separate those and report zero genuine inter-block-gap SVs.
+    """
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    haploblocks = pd.DataFrame(
+        [{"haploblock_id": "hbA", "chrom": "chr1", "start": 1000, "end": 2000,
+          "n_snps": 1, "n_clusters": 1, "hash_length": 1, "cluster_diff_score": 0.1}]
+    )
+    sv_calls = pd.DataFrame(
+        [
+            {"sv_id": "before", "chrom": "chr1", "start": 100, "end": 200, "sv_type": "DEL", "imprecise": False, "length": 100},
+            {"sv_id": "after", "chrom": "chr1", "start": 9000, "end": 9100, "sv_type": "DEL", "imprecise": False, "length": 100},
+            {"sv_id": "no_blocks", "chrom": "chr9", "start": 5, "end": 15, "sv_type": "INS", "imprecise": False, "length": 10},
+        ]
+    )
+    sample_metadata = pd.DataFrame([{"sample_id": "SAMP0", "population": "p1", "superpopulation": "EUR"}])
+    haploblocks.to_csv(in_dir / "haploblocks.tsv", sep="\t", index=False)
+    sv_calls.to_csv(in_dir / "sv_calls.tsv", sep="\t", index=False)
+    sample_metadata.to_csv(in_dir / "sample_metadata.tsv", sep="\t", index=False)
+    config = {
+        "thresholds": {"boundary_distance_bp": 100},
+        "paths": {
+            "sv_calls": str(in_dir / "sv_calls.tsv"),
+            "haploblocks": str(in_dir / "haploblocks.tsv"),
+            "sample_metadata": str(in_dir / "sample_metadata.tsv"),
+        },
+    }
+    with open(in_dir / "config.yaml", "w") as fh:
+        yaml.safe_dump(config, fh)
+
+    result = run(STAGE2_SCRIPT, ["--config", str(in_dir / "config.yaml"), "--out-dir", str(tmp_path / "out")])
+    assert "before_first_block=1" in result.stderr
+    assert "after_last_block=1" in result.stderr
+    assert "in_inter_block_gap=0" in result.stderr
+    assert "no_blocks_on_chrom=1" in result.stderr
+
+
 def test_overlapping_haploblocks_raise(tmp_path):
     haploblocks = pd.DataFrame(
         [
