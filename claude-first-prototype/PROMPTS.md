@@ -33,7 +33,7 @@ Shared context to paste into any session if it doesn't already have it: *"We're 
 ### Stage 2: Optional boundary classification
 
 **Implemented:**
-> `pipeline/stage2_intersect.py` may be run from Stage 1's generated config to classify SVs as within a block, boundary-crossing/near-boundary, or outside. Keep this descriptive result separate from cluster association: overlap with an immutable block region does not show that an SV belongs to a haplotype cluster.
+> `pipeline/stage2_intersect.py` may be run from Stage 1's generated config. Its `position_class` is based on exact overlap count (`outside_block`, `within_block`, or `boundary_crossing`); boundary proximity is a separate `near_boundary` boolean. Keep this descriptive result separate from cluster association: overlap with an immutable block region does not show that an SV belongs to a haplotype cluster.
 
 **Use:**
 > Retain Stage 2 only if boundary-crossing SVs remain a biological question of interest. It is not required for cluster-aware downstream analyses.
@@ -61,7 +61,7 @@ The remaining prompts are preserved from the original hackathon plan. They are c
 ### Stage 4: Common vs. population-specific SV classification
 
 **Implement:**
-> Write `pipeline/stage4_classify_af.py` using the per-sample genotypes and population labels provided by `sample_metadata.tsv`. Do not hardcode the five 1000 Genomes superpopulations: calculate allele frequency for whatever populations are represented in the metadata. Classify each SV as `common` (AF above a configurable threshold, default 0.05, in at least two populations), `population_specific` (AF above threshold in exactly one population and near-zero elsewhere), or `other` (doesn't meet either definition; report the fraction). Keep these population labels independent of the data.haploblocks.org clusters to avoid circularity with Stage 6. Add `sv_class` and `specific_to_population` (nullable) columns and write the result.
+> Write `pipeline/stage4_classify_af.py` using every SV in Stage 1's `sv_genotypes` tables and the population labels in its normalized `sample_metadata.tsv`. Classify each SV once before joining any block or cluster associations. Do not hardcode the five 1000 Genomes superpopulations: calculate allele frequency for whatever populations are represented in the metadata. Classify each SV as `common` (AF above a configurable threshold, default 0.05, in at least two populations), `population_specific` (AF above threshold in exactly one population and near-zero elsewhere), or `other` (doesn't meet either definition; report the fraction). Keep these population labels independent of the data.haploblocks.org clusters to avoid circularity with Stage 6. Add `sv_class` and `specific_to_population` (nullable) columns and write the result.
 
 **Test:**
 > Write a pytest test with a synthetic 3-SV, 2-population genotype matrix: one SV common to both populations, one private to population A only, one rare/absent everywhere. Assert the classification (`common`, `population_specific` with correct population, `other`) matches for all three at the default threshold.
@@ -72,7 +72,7 @@ The remaining prompts are preserved from the original hackathon plan. They are c
 ### Stage 5: Per-haploblock SV-type enrichment (with block-architecture offset)
 
 **Implement:**
-> Write `pipeline/stage5_type_enrichment.py` that builds a per-haploblock × SV-type count matrix. For each SV type, calculate the overall rate as the total number of SVs divided by total haploblock length, then calculate each block's expected count from its length. Use a Poisson test to compare observed and expected counts and apply Benjamini-Hochberg FDR correction across block × type tests. Output haploblock ID, SV type, observed count, expected count, p-value, FDR-adjusted q-value, and a q < 0.05 flag. This is a proposed analysis whose assumptions and power should be checked before implementation.
+> Write `pipeline/stage5_type_enrichment.py` using Stage 1's `sv_block_summary` and `haploblocks` tables. Count each unique (`sv_id`, `haploblock_id`) pair once; do not count rows directly from `sv_to_clusters`, where one SV-block pair can have multiple passing clusters. Build a per-haploblock × SV-type count matrix. For each SV type, calculate the overall rate as the total number of SVs divided by total haploblock length, then calculate each block's expected count from its length. Use a Poisson test to compare observed and expected counts and apply Benjamini-Hochberg FDR correction across block × type tests. Output haploblock ID, SV type, observed count, expected count, p-value, FDR-adjusted q-value, and a q < 0.05 flag. This is a proposed analysis whose assumptions and power should be checked before implementation.
 
 **Test:**
 > Write a pytest test with synthetic data: several haploblocks of varying length with SV counts proportional to length (should show no significant enrichment after offset correction), plus one haploblock with an artificially inflated count for one SV type (should be flagged as significant after FDR correction). Assert the artificially-inflated block is flagged and the proportional ones are not.

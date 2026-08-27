@@ -8,13 +8,19 @@ directory, and records their paths in config.yaml.
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 import sys
 from pathlib import Path
 
 import yaml
 
-from match_svs_to_clusters import ALL_CHROMS, main as run_cluster_aware, normalize_chrom
+from match_svs_to_clusters import (
+    ALL_CHROMS,
+    canonical_sample_id,
+    main as run_cluster_aware,
+    normalize_chrom,
+)
 
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -28,6 +34,31 @@ def parse_chroms(value: str) -> list[str]:
     if value.strip().lower() == "all":
         return ALL_CHROMS
     return [normalize_chrom(chrom.strip()) for chrom in value.split(",") if chrom.strip()]
+
+
+def normalize_sample_metadata(source: Path, samples_path: Path, destination: Path) -> None:
+    with samples_path.open() as handle:
+        sample_rows = list(csv.DictReader(handle, delimiter="\t"))
+    original_to_canonical = {
+        row["original_sample_id"]: row["sample_id"]
+        for row in sample_rows
+    }
+
+    with source.open() as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        fieldnames = reader.fieldnames
+        metadata_by_sample = {}
+        for row in reader:
+            row["sample_id"] = original_to_canonical.get(
+                row["sample_id"], canonical_sample_id(row["sample_id"])
+            )
+            metadata_by_sample[row["sample_id"]] = row
+
+    with destination.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t", lineterminator="\n")
+        writer.writeheader()
+        for sample in sample_rows:
+            writer.writerow(metadata_by_sample[sample["sample_id"]])
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -80,6 +111,15 @@ def main(argv: list[str] | None = None) -> None:
     log.info("Running cluster-aware preprocessing for %d chromosome(s)", len(chroms))
     run_cluster_aware(cluster_args)
 
+    normalized_metadata_path = None
+    if args.sample_metadata is not None:
+        normalized_metadata_path = args.out_dir / "sample_metadata.tsv"
+        normalize_sample_metadata(
+            args.sample_metadata,
+            args.out_dir / "samples.tsv",
+            normalized_metadata_path,
+        )
+
     config = {
         "genome_build": "GRCh38",
         "data_sources": {
@@ -125,7 +165,8 @@ def main(argv: list[str] | None = None) -> None:
         },
     }
     if args.sample_metadata is not None:
-        config["paths"]["sample_metadata"] = str(args.sample_metadata.resolve())
+        config["data_sources"]["sample_metadata"] = str(args.sample_metadata.resolve())
+        config["paths"]["sample_metadata"] = str(normalized_metadata_path.resolve())
     config_path = args.out_dir / "config.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
     log.info("Stage 1 complete: %s", config_path.resolve())

@@ -54,6 +54,8 @@ Stage 0 is not yet implemented in this prototype. **Linh is working on it.** Its
 
 The planned Stage 0 will use sample merging followed by `truvari collapse`. It should also permit a different cohort to be supplied as a list of single-sample VCFs. It will not run kanpig. Consequently, it may retain inversions, while BND records will probably remain outside the merged callset.
 
+Stage 0 owns representation-level QC: reconciling equivalent calls, deduplicating them, and applying any cohort-wide FILTER or size policy. Stage 1 preserves every record it receives and reports genotype/association QC without silently removing IMPRECISE calls or particular SV types. Analysis-specific size or confidence subsets belong in the downstream analysis that requests them.
+
 For the hackathon, Stage 1 starts from the existing pre-merged VCF at `input/1kgp_ont_cohort.postfilter.full.vcf.gz`. That file was produced previously using:
 
 1. Sniffles SV calling
@@ -75,12 +77,13 @@ The default output directory is `claude-first-prototype/stage1_output/`. Chromos
 
 - `sv_genotypes.<chrom>.tsv`: one row per SV, with normalized metadata followed by one raw GT column per sample. This is the Stage 4 and Stage 7 genotype contract.
 - `samples.tsv`: canonical sample IDs and their original VCF IDs.
+- `sample_metadata.tsv`: when `--sample-metadata` is supplied, a VCF-ordered copy containing only cohort samples and using the canonical IDs from `samples.tsv`.
 - `haploblocks.<chrom>.tsv`: one row per haploblock.
 - `cluster_memberships.<chrom>.tsv`: one row per represented sample haplotype and haploblock cluster. This is the independent cluster input for Stages 6 and 7.
 - `sv_block_summary.<chrom>.tsv`: one row per overlapping SV and haploblock, including association counts but never duplicating a pair by passing cluster. This is the counting input for Stage 5.
 - `sv_to_clusters.<chrom>.tsv`: one row per SV, haploblock, and cluster that passes the association threshold.
 
-All paths are registered in `stage1_output/config.yaml`. Population labels remain independent of cluster inference: pass the Stage 0 table with `--sample-metadata` to register it for Stages 4, 6, and 7. Useful method diagnostics are kept under `debug_and_qc/`; downloaded cluster files remain temporary and are removed after a successful run.
+All paths are registered in `stage1_output/config.yaml`. Population labels remain independent of cluster inference: pass the Stage 0 table with `--sample-metadata` to normalize and publish it for Stages 4, 6, and 7. Useful method diagnostics are kept under `debug_and_qc/`; downloaded cluster files remain temporary and are removed after a successful run.
 
 The table keys and row meanings are part of the contract:
 
@@ -92,13 +95,13 @@ The table keys and row meanings are part of the contract:
 | `sv_block_summary` | overlapping SV–haploblock pair | `sv_id`, `haploblock_id`; this key is unique even when several clusters pass |
 | `sv_to_clusters` | passing SV–haploblock–cluster association | `sv_id`, `haploblock_id`, `cluster_id` |
 
-The optional `sample_metadata` table must use the canonical `sample_id` values in `samples.tsv` and provide a `population` column. A `superpopulation` column may also be supplied, but downstream analyses must state explicitly which grouping they use.
+The supplied `sample_metadata` table must provide `sample_id` and `population`. Stage 1 accepts original or canonical sample IDs, writes canonical IDs, removes metadata rows for samples absent from the VCF, and orders the result like the VCF. A `superpopulation` column may also be supplied, but downstream analyses must state explicitly which grouping they use.
 
 ### Downstream ownership
 
 | Stage | Stage 1 inputs |
 |---|---|
-| 4 | `sv_genotypes`, `sample_metadata`, and `sv_block_summary` |
+| 4 | Classify every row in `sv_genotypes` once using `sample_metadata`; join `sv_block_summary` afterward for block-level summaries |
 | 5 | `sv_block_summary` and `haploblocks`; count unique `sv_id, haploblock_id` pairs |
 | 6 | Stage 4 classifications plus `cluster_memberships` and `sample_metadata` |
 | 7 | `sv_genotypes`, `cluster_memberships`, and `sample_metadata` |
@@ -133,7 +136,7 @@ For heterozygous samples, the VCF phase is not assumed to match the cluster-gene
 
 ## Optional Stage 2: boundary classification
 
-`pipeline/stage2_intersect.py` remains available for the separate descriptive question of whether an SV lies safely within a block or near/crosses a block boundary. It reads Stage 1's generated config:
+`pipeline/stage2_intersect.py` remains available for the separate descriptive boundary question. `position_class` uses exact overlap count: zero blocks is `outside_block`, one is `within_block`, and two or more is `boundary_crossing`. Proximity is retained separately as `near_boundary`, using `boundary_distance_bp`; a nearby SV is not mislabeled as crossing. It reads Stage 1's generated config:
 
 ```bash
 python claude-first-prototype/pipeline/stage2_intersect.py \
@@ -144,4 +147,4 @@ This analysis is not required to establish cluster association. Because publishe
 
 ## Current testing status
 
-The earlier dbVar ingestion/QC tests described in the historical prototype no longer match the current pipeline. Tests for the cluster-aware workflow will be handled in a separate testing pass.
+Focused contract tests cover Stage 1's normalized downstream tables, metadata canonicalization, and the distinction between exact boundary crossing and proximity. The earlier dbVar ingestion/QC tests described in the historical prototype no longer match the current pipeline.

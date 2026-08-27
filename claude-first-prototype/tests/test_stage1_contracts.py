@@ -35,7 +35,12 @@ def test_stage1_publishes_downstream_contract(tmp_path: Path) -> None:
     write_test_vcf(vcf_path)
 
     metadata_path = tmp_path / "sample_metadata.tsv"
-    metadata_path.write_text("sample_id\tpopulation\nNA00001\tPOP1\nSAMPLE2\tPOP2\n")
+    metadata_path.write_text(
+        "sample_id\tpopulation\tsuperpopulation\n"
+        "EXTRA\tOTHER\tOTHER\n"
+        "SAMPLE2\tPOP2\tSUPER2\n"
+        "GM00001\tPOP1\tSUPER1\n"
+    )
 
     cluster_dir = tmp_path / "clusters" / "chr1"
     cluster_dir.mkdir(parents=True)
@@ -78,6 +83,12 @@ def test_stage1_publishes_downstream_contract(tmp_path: Path) -> None:
     assert samples == [
         {"sample_id": "NA00001", "original_sample_id": "GM00001"},
         {"sample_id": "SAMPLE2", "original_sample_id": "SAMPLE2"},
+    ]
+
+    normalized_metadata = read_tsv(out_dir / "sample_metadata.tsv")
+    assert normalized_metadata == [
+        {"sample_id": "NA00001", "population": "POP1", "superpopulation": "SUPER1"},
+        {"sample_id": "SAMPLE2", "population": "POP2", "superpopulation": "SUPER2"},
     ]
 
     genotypes = read_tsv(out_dir / "sv_genotypes.chr1.tsv")

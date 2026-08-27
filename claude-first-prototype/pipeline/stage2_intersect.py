@@ -1,9 +1,11 @@
 """Optional Stage 2: classify cohort SVs relative to haploblock boundaries.
 
 Stage 1 already links SVs to associated haplotype clusters. This script is
-only needed for the separate positional question: whether SVs lie inside,
-near, or across haploblock boundaries. It reads the same VCF and the compact
-per-chromosome haploblock tables registered in Stage 1's config.yaml.
+only needed for the separate positional question. ``position_class`` records
+exact overlap: zero blocks is outside, one is within, and two or more is
+boundary_crossing. ``near_boundary`` separately records proximity to an edge.
+The script reads the same VCF and the compact per-chromosome haploblock tables
+registered in Stage 1's config.yaml.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ log = logging.getLogger("stage2_intersect")
 def classify_sv_positions(sv: pd.DataFrame, hb: pd.DataFrame, boundary_bp: int) -> pd.DataFrame:
     position_class = np.full(len(sv), "outside_block", dtype=object)
     haploblock_ids = np.full(len(sv), "", dtype=object)
+    near_boundary = np.full(len(sv), False, dtype=bool)
 
     for chrom, hb_group in hb.groupby("chrom", sort=False):
         hb_group = hb_group.sort_values("start")
@@ -44,43 +47,28 @@ def classify_sv_positions(sv: pd.DataFrame, hb: pd.DataFrame, boundary_bp: int) 
         sv_ends = sv.loc[sv_mask, "end"].to_numpy()
         chrom_classes = np.full(sv_mask.sum(), "outside_block", dtype=object)
         chrom_ids = np.full(sv_mask.sum(), "", dtype=object)
+        chrom_near_boundary = np.full(sv_mask.sum(), False, dtype=bool)
 
         for row_index, (sv_start, sv_end) in enumerate(zip(sv_starts, sv_ends)):
-            first = np.searchsorted(ends, sv_start - boundary_bp, side="left")
-            last = np.searchsorted(starts, sv_end + boundary_bp, side="right")
-            relevant = []
-            safely_inside = None
-            for block_index in range(first, last):
-                block_start = starts[block_index]
-                block_end = ends[block_index]
-                overlaps = sv_start < block_end and sv_end > block_start
-                if overlaps:
-                    relevant.append(ids[block_index])
-                    if (
-                        block_start <= sv_start
-                        and sv_end <= block_end
-                        and sv_start - block_start >= boundary_bp
-                        and block_end - sv_end >= boundary_bp
-                    ):
-                        safely_inside = ids[block_index]
-                else:
-                    gap = block_start - sv_end if block_start >= sv_end else sv_start - block_end
-                    if 0 <= gap < boundary_bp:
-                        relevant.append(ids[block_index])
-
-            if not relevant:
+            overlap_indices = np.flatnonzero((sv_start < ends) & (sv_end > starts))
+            if not len(overlap_indices):
                 continue
-            chrom_classes[row_index] = (
-                "within_block" if len(relevant) == 1 and safely_inside is not None else "boundary_crossing"
+            chrom_classes[row_index] = "within_block" if len(overlap_indices) == 1 else "boundary_crossing"
+            chrom_ids[row_index] = ",".join(ids[overlap_indices])
+            boundaries = np.concatenate([starts[overlap_indices], ends[overlap_indices]])
+            chrom_near_boundary[row_index] = len(overlap_indices) > 1 or bool(
+                np.any(np.abs(boundaries - sv_start) < boundary_bp)
+                or np.any(np.abs(boundaries - sv_end) < boundary_bp)
             )
-            chrom_ids[row_index] = ",".join(relevant)
 
         position_class[sv_mask] = chrom_classes
         haploblock_ids[sv_mask] = chrom_ids
+        near_boundary[sv_mask] = chrom_near_boundary
 
     result = sv.copy()
     result["position_class"] = position_class
     result["haploblock_id"] = haploblock_ids
+    result["near_boundary"] = near_boundary
     return result
 
 
@@ -155,6 +143,7 @@ def main(argv: list[str] | None = None) -> None:
         qc["chromosomes"][chrom] = {
             "sv_records": len(annotated),
             "position_class_counts": counts,
+            "near_boundary_records": int(annotated["near_boundary"].sum()),
             "output": str(output_path.resolve()),
         }
         log.info("%s: %s", chrom, counts)
