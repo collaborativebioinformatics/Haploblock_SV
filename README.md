@@ -37,13 +37,14 @@ The wider pipeline is exploratory rather than a fixed production analysis. It is
 
 ## Contributors
 
-The scientific idea was introduced by:
+The scientific idea, aim and scope of this project were introduced by:
+
 - Jędrzej Kubica jedrzej.kubica@univ-grenoble-alpes.fr 
 - Lynn Ly lynn.ly@nanoporetech.com
 - Maria Fernanda Cardenas maria.cardenas@stjude.org
 - Linh Nguyen nguyen.linh.1010@ku.edu
 
-at the Structural Variants Hackathon at Baylor College of Medicine on August 25-28, 2026. The technology was created by agentic AI provided by Claude, ChatGPT and Codex.
+The technology was created by agentic AI provided by Claude, ChatGPT and Codex.
 
 # Workflow
 
