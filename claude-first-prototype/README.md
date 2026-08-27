@@ -1,6 +1,6 @@
 # Haploblock_SV — Structural Variants Within Haploblocks
 
-Prototype pipeline plan for the Structural Variants Hackathon at Baylor College of Medicine, August 25–28, 2026. Stages 0–2 are implemented and run end-to-end on the example data (see the "Prototype" sections below and `PROMPTS.md` for the per-stage handoff prompts). Stages 4–9 are still prompt specs pending biological review. Stage 3 (boundary enrichment) has been dropped from the pipeline — see "Descoped / future steps".
+Prototype pipeline plan for the Structural Variants Hackathon at Baylor College of Medicine, August 25–28, 2026. Stages 0–2 and Stage 4 are implemented and run end-to-end on the example data (see the "Prototype" sections below and `PROMPTS.md` for the per-stage handoff prompts). Stages 5–9 are still prompt specs pending biological review. Stage 3 (boundary enrichment) has been dropped from the pipeline — see "Descoped / future steps".
 
 ## Introduction
 
@@ -18,7 +18,7 @@ The expected deliverable is a reusable, parameterized pipeline plus a per-haplob
 | 1 | QC & normalization | Filter SVs on size and coordinate sanity, dedup, validate the haploblock BED is sorted/non-overlapping. IMPRECISE calls are **kept by default** (dropping them removes every inversion); `--drop-imprecise` opts back in | Implemented |
 | 2 | SV × haploblock intersection | Check every SV against every haploblock on its chromosome; classify by overlap count — 1 block = `within_block`, ≥ 2 = `boundary_crossing` (spans a shared edge), 0 = `outside_block`. No proximity threshold. Blocks are contiguous within their span but do not reach the telomeres, so `outside_block` = telomeric/centromeric SVs (logged with a before/after/in-gap breakdown) | Implemented |
 | ~~3~~ | ~~Boundary enrichment test~~ | Removed from the pipeline (see "Descoped / future steps"). Stage numbers 4–9 are kept as-is for continuity with the prompts | Removed |
-| 4 | Common vs. population-specific SV classification | Allele frequency per population from `sample_metadata.tsv` (whatever populations it holds — no fixed AFR/AMR/EAS/EUR/SAS list). Per `sv_id × sv_type × haploblock_id`: the per-population AF and a category of `common`, `specific_to_population`, or `other` (too little data) | Proposed |
+| 4 | Common vs. population-specific SV classification | Alt-allele frequency per population from `sample_metadata.tsv` (whatever populations it holds — no fixed AFR/AMR/EAS/EUR/SAS list). Per `sv_id × sv_type × haploblock_id`: the per-population AF and a category of `common`, `specific_to_population`, or `other` (too little data / rare) | Implemented |
 | 5 | Per-haploblock SV-type enrichment | Per-haploblock × SV-type count matrix; overall per-type rate = total SVs of that type / total haploblock length; expected count per block from its length; Poisson test observed vs. expected; Benjamini-Hochberg FDR across all block × type tests; flag q < 0.05 | Proposed |
 | 6 | Population-cluster correlation | Compare Stage 4's population-specific SV patterns against the predefined SNV-based haploblock clusters; `--clusters` builds the cluster table from a data.haploblocks.org clusters file | Proposed |
 | 7 | SV-based population structure reconstruction | Per-sample × per-haploblock SV matrix → PCA/UMAP; output **PNG plots and cluster assignments only**, colored by the populations in `sample_metadata.tsv` | Proposed |
@@ -136,9 +136,31 @@ INFO: outside_block breakdown: before_first_block=1692 after_last_block=1339 in_
 ```
 `in_inter_block_gap=0` is the check that matters: every `outside_block` SV is a telomeric call before the first block or after the last, or (15 of them) on a chromosome with no haploblocks at all (chrY) — none fell in a gap *between* blocks, confirming the haploblock table is contiguous and the matching has no ordering bug. Only 1,519 SVs genuinely straddle a block edge; the rest sit cleanly inside one block.
 
+## Prototype: Stage 4 (common vs. population-specific classification)
+
+`pipeline/stage4_classify_af.py` reads Stage 2's annotated `sv_calls.tsv` and `sample_metadata.tsv`, computes per-population **alt-allele frequency** for each SV, and labels the SV `common` / `specific_to_population` / `other`. Populations are read from `sample_metadata.tsv`'s `population` column — nothing is hardcoded — and the data.haploblocks.org cluster labels are deliberately not read here, so Stage 6's SV-vs-cluster correlation stays non-circular. Genotype columns may be VCF GT strings (`0|1`, `./.`; Stage 0's `--vcf` path) or 0/1/2 dosage ints (dbVar/synthetic paths); a missing genotype is "not called", never reference.
+
+Rules (`t` = `--af-threshold`, default from config's `af_common_threshold` = 0.05; `z` = `--absent-af-threshold` = 0.01; a population "has data" for an SV when ≥ `--min-samples-per-pop` = 2 of its samples are called): `common` = AF ≥ t in ≥ 2 populations; `specific_to_population` = AF ≥ t in exactly one population and AF < z in every other population with data; `other` = everything else, with an `other_reason` of `absent_or_rare`, `one_pop_high_plus_intermediate_elsewhere`, or `insufficient_population_data`.
+
+**Run command** (chains off Stage 2's config, or use the bundled example):
+```
+~/pyenvs/pyEnv_SVhack2026/bin/python pipeline/stage4_classify_af.py \
+  --config example_data/stage4_example/config.yaml --out-dir stage4_output
+```
+
+**Expected output** on `example_data/stage4_example/` (4 populations, one SV per category):
+```
+INFO: 4 population(s) from sample_metadata: {'popA': 5, 'popB': 5, 'popC': 5, 'popD': 1}
+INFO: Classified 5 SV(s) (t=0.05, near-zero<0.01, min 2 called samples/pop): {'specific_to_population': 2, 'other': 2, 'common': 1}
+INFO: 'other' fraction: 0.40
+INFO: 'other' breakdown: {'absent_or_rare': 1, 'insufficient_population_data': 1}
+INFO: Wrote 20 rows (5 SVs x 4 populations) to .../stage4_output/sv_af_classification.tsv
+```
+Output is a tidy/long table — one row per (SV × population) with `af`, `n_called`, `pop_has_data`, and the per-SV `sv_category` / `specific_to_population` / `other_reason`. On the real nstd152 data (9 samples, 3 populations, n=3 each) the classification runs in seconds over ~50k SVs but is badly underpowered — with 6 alleles per population, AF steps are ~0.17 and "near-zero < 0.01" only means "exactly absent", so almost everything lands in `common` or `specific_to_population`. A wider cohort via Stage 0's `--vcf` is what makes this stage meaningful.
+
 ## Tests
 
-`tests/test_stage0_ingest.py`, `tests/test_stage1_qc.py`, and `tests/test_stage2_intersect.py` run all three stages end-to-end on synthetic (offline) data — plus a `--vcf` path check, the imprecise-kept-by-default / `--drop-imprecise` behaviour, hand-crafted small-table cases for Stage 2's exact classification rules, and the `outside_block` breakdown log. Run with:
+`tests/test_stage0_ingest.py`, `tests/test_stage1_qc.py`, `tests/test_stage2_intersect.py`, and `tests/test_stage4_classify_af.py` run the stages end-to-end on synthetic / small example data — plus a `--vcf` path check, the imprecise-kept-by-default / `--drop-imprecise` behaviour, Stage 2's exact classification rules and `outside_block` breakdown, and Stage 4's category logic on both GT-string and dosage-int genotypes. Run with:
 ```
 ~/pyenvs/pyEnv_SVhack2026/bin/python -m pytest tests/ -v
 ```

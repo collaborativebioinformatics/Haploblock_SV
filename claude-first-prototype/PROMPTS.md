@@ -2,7 +2,7 @@
 
 Ready-to-use prompts for an agentic coding assistant, organized by pipeline stage and by day (see `README.md` for the full plan). Each prompt is self-contained enough to hand to a fresh agent session — it restates the relevant context rather than assuming prior conversation.
 
-Shared context to paste into any session if it doesn't already have it: *"We're building a Python pipeline for a hackathon that studies structural variants (SVs: DEL/DUP/INV/INS) within 'haploblocks' — LD-defined haplotype-hash regions from data.haploblocks.org. SV calls come from dbVar study nstd152 (Chaisson et al. 2019), or from an arbitrary multi-sample SV VCF supplied to Stage 0 via `--vcf`. Population labels come from whatever is in `sample_metadata.tsv` (a `population` column) — never a hardcoded list of the five 1000G superpopulations. The pipeline is a sequence of independently-runnable, parameterized stages under `pipeline/`, each a script taking input paths and config values as CLI args — never hardcoded paths. Stages 0–2 are implemented; Stage 3 was removed (numbering keeps 4–9); Stages 4–9 are specs. See README.md for the full stage list."*
+Shared context to paste into any session if it doesn't already have it: *"We're building a Python pipeline for a hackathon that studies structural variants (SVs: DEL/DUP/INV/INS) within 'haploblocks' — LD-defined haplotype-hash regions from data.haploblocks.org. SV calls come from dbVar study nstd152 (Chaisson et al. 2019), or from an arbitrary multi-sample SV VCF supplied to Stage 0 via `--vcf`. Population labels come from whatever is in `sample_metadata.tsv` (a `population` column) — never a hardcoded list of the five 1000G superpopulations. The pipeline is a sequence of independently-runnable, parameterized stages under `pipeline/`, each a script taking input paths and config values as CLI args — never hardcoded paths. Stages 0–2 and Stage 4 are implemented; Stage 3 was removed (numbering keeps 4–9); Stages 5–9 are specs. See README.md for the full stage list."*
 
 ---
 
@@ -65,6 +65,8 @@ Shared context to paste into any session if it doesn't already have it: *"We're 
 
 **Wire to next stage:**
 > Confirm Stage 6 (population-cluster correlation) and Stage 8 (DUP/INV overlay) both read the category / `specific_to_population` columns added here, and that Stage 6 gets its SNV-based cluster labels only from its own separate input, never from this script.
+
+**Implemented:** `pipeline/stage4_classify_af.py`. Output `sv_af_classification.tsv` is tidy/long — one row per (SV × population) with `af`, `n_called`, `pop_has_data`, and per-SV `sv_category` / `specific_to_population` / `other_reason` (`absent_or_rare` / `one_pop_high_plus_intermediate_elsewhere` / `insufficient_population_data`). Flags: `--af-threshold` (default = config's `af_common_threshold`), `--absent-af-threshold` (0.01), `--min-samples-per-pop` (2). Example: `example_data/stage4_example/`. `haploblock_id` is passed through from Stage 2 verbatim (comma-joined ids for `boundary_crossing` SVs are not split).
 
 ### Stage 5: Per-haploblock SV-type enrichment
 

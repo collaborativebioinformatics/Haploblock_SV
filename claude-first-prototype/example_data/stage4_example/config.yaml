@@ -1,0 +1,6 @@
+genome_build: GRCh38
+thresholds:
+  af_common_threshold: 0.05
+paths:
+  sv_calls: sv_calls.tsv
+  sample_metadata: sample_metadata.tsv

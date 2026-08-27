@@ -1,0 +1,6 @@
+sv_id	chrom	start	end	sv_type	imprecise	length	S_A1	S_A2	S_A3	S_A4	S_A5	S_B1	S_B2	S_B3	S_B4	S_B5	S_C1	S_C2	S_C3	S_C4	S_C5	S_D1	position_class	haploblock_id
+sv_common	chr1	1000	1500	DEL	False	500	0/1	0/1	0/1	0/0	0/0	1/1	0/1	0/0	0/0	0/0	0/1	0/0	0/0	0/0	0/0	0/0	within_block	hb_1
+sv_specific_popB	chr1	2000	2001	INS	False	250	0/0	0/0	0/0	0/0	0/0	0|1	0|1	0|1	1|1	0|0	0/0	0/0	0/0	0/0	0/0	0/0	within_block	hb_1
+sv_rare	chr1	3000	3400	INV	True	400	0/0	0/0	./.	0/0	0/0	0/0	0/0	0/0	0/0	0/0	0/0	0/0	0/0	0/0	0/0	0/1	boundary_crossing	hb_2,hb_3
+sv_lowdata	chr1	4000	4200	DEL	False	200	./.	./.	./.	./.	./.	./.	./.	./.	./.	./.	./.	./.	./.	./.	./.	0/1	within_block	hb_2
+sv_specific_popA	chr1	5000	5800	DUP	False	800	1/1	0/1	0/1	0/0	0/0	0/0	0/0	0/0	0/0	0/0	0/0	0/0	0/0	0/0	0/0	0/0	within_block	hb_3
