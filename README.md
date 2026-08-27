@@ -62,7 +62,9 @@ The wider pipeline is exploratory rather than a fixed production analysis. It is
 | Stage 3 | Boundary enrichment | Removed |
 | Stage 4 | Haploblock classification | Define common vs population-specific haploblocks |
 | Stage 5 | SV type enrichment | Test enrichment of SV types across haploblock classes |
-| Stage 6 | Cluster comparison | Compare haploblock/SV patterns with previously defined population clusters |
+| Stage 6 | Population-conditioned cluster association | Test whether local SNV-derived clusters predict SV carriage beyond population membership |
+| Stage 7 | Haploblock information gain and QC | Measure what local hashes capture or miss about SV carriage; retain SV PCA as QC |
+| Stage 8 | Consequence-aware annotation | Rank cluster-informative SVs using SV-type-aware gene, exon, and breakpoint consequences |
 
 
 ## Development status 
@@ -77,7 +79,9 @@ The pipeline is currently under active development
 - [ ] Stage 3 — Boundary enrichment
 - [x] Stage 4 — Common vs population-specific SV classification
 - [x] Stage 5 — SV type enrichment
-- [ ] Stage 6 — Population cluster comparison
+- [x] Stage 6 — Population-conditioned SV–cluster association
+- [x] Stage 7 — Haploblock information gain and population-structure QC
+- [x] Stage 8 — Consequence-aware candidate annotation
 
 
 # Results

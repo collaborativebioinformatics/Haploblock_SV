@@ -8,3 +8,6 @@ pandas
 
 # Stage 5 SV-type enrichment
 scipy
+
+# Stage 7 population-structure QC plot
+matplotlib

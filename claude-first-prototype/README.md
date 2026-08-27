@@ -16,12 +16,24 @@ Haploblocks — genomic regions of conserved haplotype structure identified by t
 | 3 | Boundary enrichment test | Earlier proposal for permutation/spacing tests; not part of the current pipeline | Future decision |
 | 4 | Common vs. population-specific SV classification | Calculate AF using populations supplied by `sample_metadata.tsv`, independently of haploblocks.org clusters | Implemented |
 | 5 | Per-haploblock SV-type enrichment | Length-adjusted Poisson tests across the complete block-by-type grid, with BH-FDR correction | Implemented |
-| 6 | Population-cluster correlation | Compare population-specific SV patterns with predefined SNV-based haplotype clusters | Proposed |
-| 7 | SV-based population structure reconstruction | Per-sample/per-haploblock SV matrix → PCA/UMAP and cluster-agreement summaries | Proposed visualization |
-| 8 | Duplication/inversion gene overlay | Gene overlap for supported recurrent/population-specific SV types; INV depends on a future Stage 0 that retains inversions | Proposed |
+| 6 | Population-conditioned SV–cluster association | Test whether local SNV-derived clusters predict SV carriage beyond population membership and whether associations transfer across populations | Implemented |
+| 7 | Haploblock information gain and structure QC | Measure what local hashes capture or miss about SV carriage; retain SV PCA as descriptive QC | Implemented |
+| 8 | Consequence-aware candidate annotation | Interpret prioritized SVs using type-aware gene/exon and breakpoint consequences | Implemented |
 | 9 | Integration & report | Aggregate analysis results into a per-haploblock summary and plots | Proposed |
 
 If pursued, Stages 4–8 contain separable questions and can largely be divided across the team after Stage 1 outputs have been evaluated.
+
+### Rationale for the Stage 6–8 refinement
+
+The initial downstream plan emphasized agreement metrics and population-structure visualizations.
+Those remain useful validation and QC, but population structure from SV genotypes and population
+differentiation of SVs are already expected from established population genetics. The refined plan
+therefore focuses on the contribution specific to this project: determining when the local
+SNV-derived genomic hashes provide portable tags for long-read SVs, when an association depends on
+population background, and when SVs subdivide an existing hash and add previously unrepresented
+local information. Candidate annotation then distinguishes plausible breakpoint, exon, dosage, and
+span consequences rather than treating every gene overlap equally. These changes retain the useful
+components of the original plan while producing more directly interpretable locus-level results.
 
 ## Original hackathon development plan (historical)
 
@@ -169,6 +181,49 @@ The output `stage5_output/sv_type_enrichment.tsv` contains observed and expected
 
 This is deliberately a readable first model with haploblock length as its only exposure adjustment. SNP density, callability, overdispersion, and minimum-count policies should be evaluated before treating significant cells as final biological results.
 
+## Rescoped Stage 6: population-conditioned SV–cluster association
+
+`pipeline/stage6_cluster_association.py` evaluates each local cluster for every overlapping
+SV–haploblock pair. It removes population means from cluster dosage and SV dosage before measuring
+their association, then permutes SV genotypes within populations for an empirical null. This asks
+whether the local hash contains information beyond population allele-frequency differences. The
+outputs retain all tested cluster associations and a one-row-per-SV–block summary that distinguishes
+portable, population-dependent, and other detected associations.
+
+Run Stage 6 with Stage 4's carried-forward config when population classifications should remain
+available to Stage 8:
+
+```bash
+python claude-first-prototype/pipeline/stage6_cluster_association.py \
+  --config claude-first-prototype/stage4_output/config.yaml
+```
+
+## Rescoped Stage 7: haploblock information gain and PCA QC
+
+`pipeline/stage7_information_gain.py` measures how much local diplotype reduces uncertainty about
+each SV and how often well-represented diplotypes contain both carriers and non-carriers. The first
+quantity identifies SVs that are well tagged by existing hashes; the second identifies candidates
+that add local information missing from those hashes. It also writes reusable PCA coordinate and
+variance tables plus a population- and superpopulation-colored QC plot.
+
+```bash
+python claude-first-prototype/pipeline/stage7_information_gain.py \
+  --config claude-first-prototype/stage1_output/config.yaml
+```
+
+## Rescoped Stage 8: consequence-aware candidate annotation
+
+`pipeline/stage8_candidate_annotation.py` joins Stage 6 candidates to a supplied GTF and labels
+consequences according to SV type. In particular, inversion breakpoint disruption is kept distinct
+from genes merely contained in an inverted span. The candidate score combines explicit association,
+annotation, and call-quality components for triage and is not interpreted as evidence of causality.
+
+```bash
+python claude-first-prototype/pipeline/stage8_candidate_annotation.py \
+  --config claude-first-prototype/stage6_output/config.yaml \
+  --gtf path/to/genes.gtf
+```
+
 ## Current testing status
 
-Focused contract tests cover Stage 1's normalized downstream tables, metadata canonicalization, the distinction between exact boundary crossing and proximity, Stage 4 population classification, and Stage 5's length-adjusted enrichment contract. The earlier dbVar ingestion/QC tests described in the historical prototype no longer match the current pipeline.
+Focused contract tests cover Stage 1's normalized downstream tables, metadata canonicalization, the distinction between exact boundary crossing and proximity, Stage 4 population classification, Stage 5's length-adjusted enrichment contract, population-conditioned Stage 6 controls, Stage 7 information gain/PCA tables, and SV-type-aware Stage 8 consequences. The earlier dbVar ingestion/QC tests described in the historical prototype no longer match the current pipeline.

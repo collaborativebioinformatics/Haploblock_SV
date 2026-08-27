@@ -82,40 +82,84 @@ The remaining prompts are preserved from the original hackathon plan. They are c
 
 ---
 
-## Day 3 (Aug 27) — Stages 6–8 (parallelizable)
+## Day 3 (Aug 27) — Rescoped Stages 6–8 (parallelizable)
 
-### Stage 6: Population-cluster correlation
+The original proposals below were refined after biological review. Population structure is an
+important control and descriptive result, but SV-based ancestry plots and population-label
+agreement are already well established. The revised analyses therefore ask a more specific
+question: what information about SV carriage is captured, or missed, by the local SNV-derived
+haploblock clusters? This keeps the useful population comparisons while making the main outputs
+interpretable at individual loci. Functional annotation is then applied to the most informative
+SVs instead of treating any gene overlap as equivalent evidence.
 
-**Implement:**
-> Write `pipeline/stage6_cluster_correlation.py` that reads Stage 4's classified SV table and computes, per haploblock, a population-specific-SV density (e.g. count of population-specific SVs / total SVs, or / block length). Use the cluster memberships downloaded and normalized by Stage 1 to derive the separate SNV-haplotype cluster quantity to compare against. Compute a Spearman correlation between the two per-block quantities, with a permutation-based p-value (shuffle block labels, default 1000 permutations). Output the correlation coefficient, p-value, and a per-block table for plotting. The exact cluster differentiation summary still needs biological definition.
-
-**Test:**
-> Write a pytest test with synthetic data where population-specific-SV density is constructed to be a noisy linear function of a synthetic cluster-differentiation score; assert the computed Spearman correlation is positive and significant (p < 0.05) at a fixed seed, and a shuffled-label negative control on the same data is not significant.
-
-**Wire to next stage:**
-> Confirm Stage 9 reads this stage's correlation coefficient/p-value and per-block table to render the population-correlation section of the report; note in a comment whether the sign/magnitude found matches or contradicts H3's expectation, so the report can state the finding plainly.
-
-### Stage 7: SV-based population structure reconstruction
+### Stage 6: Population-conditioned SV–cluster association
 
 **Implement:**
-> Write `pipeline/stage7_sv_clustering.py` that builds a per-sample × per-haploblock SV presence/absence (or dosage) matrix, runs PCA and UMAP with fixed seeds, clusters the reduced embedding, and compares the assignments with (a) the populations supplied by `sample_metadata.tsv` and (b) data.haploblocks.org's hash-based clusters. Output PNG PCA/UMAP plots and cluster assignments; additional agreement statistics remain optional pending a precise definition of the cross-block cluster labels.
+> Write `pipeline/stage6_cluster_association.py` using Stage 1's `sv_genotypes`,
+> `sv_block_summary`, `cluster_memberships`, and `sample_metadata` tables. For every overlapping
+> SV–haploblock pair, test whether dosage of each local SNV-derived cluster predicts SV dosage
+> after population means are removed. Estimate an empirical p-value by permuting SV genotypes
+> within populations, thereby preserving population-specific allele frequencies. Report carrier
+> rates with and without the cluster, the population-adjusted correlation, FDR, the number of
+> individually informative populations, and directional consistency across them. Classify the
+> strongest association per SV–block as a portable cluster tag, population-dependent association,
+> cluster association, or no detected cluster signal. Stage 6 should read normalized cluster tables
+> from Stage 1's config; cluster fetching and normalization remain Stage 1 responsibilities rather
+> than being duplicated in Stage 0 or Stage 6.
 
 **Test:**
-> Write a pytest test with a small synthetic SV matrix constructed so that two groups of samples have clearly distinct SV profiles (e.g. disjoint sets of population-specific SVs); assert the resulting clustering recovers the two groups with ARI > 0.8 against the known synthetic group labels, at a fixed seed.
+> Use synthetic populations in which one cluster predicts an SV within both populations, plus an
+> SV whose apparent association is caused only by different population frequencies. Assert that
+> the within-population permutation identifies the portable local association and does not promote
+> the ancestry-only signal.
 
 **Wire to next stage:**
-> Confirm Stage 9 can read the embedding and cluster assignments to render scatter plots colored by the populations from `sample_metadata.tsv` and, separately, by an appropriately defined haploblocks.org cluster label. If agreement statistics are retained, report differences plainly.
+> Stage 8 should use the per-SV association and pattern fields to prioritize functional annotation.
+> Stage 9 should summarize counts and examples of each association pattern rather than elevate one
+> genome-wide correlation as the biological result.
 
-### Stage 8: Duplication/inversion gene overlay
+### Stage 7: Haploblock information gain and population-structure QC
 
 **Implement:**
-> For a future cohort VCF containing DUP and/or INV records, write `pipeline/stage8_dup_inv_overlay.py` to identify recurrent and population-specific calls and overlap them against a gene annotation GTF. Output a ranked table of stand-out DUP/INV calls with overlapping gene names. The current kanpig-regenotyped input contains only DEL and INS, so this stage cannot run meaningfully on it. A selection-scan overlay is deferred to possible future work rather than included in this stage.
+> Write `pipeline/stage7_information_gain.py` that measures, per SV–haploblock pair, how much local
+> haploblock diplotype reduces uncertainty about SV carriage and how often sufficiently represented
+> diplotypes still contain both carriers and non-carriers. Aggregate these quantities per block to
+> identify blocks where SVs are well tagged and blocks where SVs add information missing from the
+> SNV-derived hashes. Also produce a genome-wide SV PCA as a QC view, saving coordinate and
+> explained-variance tables as well as a PNG colored by `population` and, when available,
+> `superpopulation`. PCA is descriptive QC rather than the main biological result; UMAP and
+> unsupervised population clustering are omitted until they answer a defined downstream question.
 
 **Test:**
-> Write a pytest test with a synthetic DUP/INV table and a tiny synthetic GTF (2-3 genes at known coordinates); assert the gene-overlap output correctly attributes each synthetic SV to the gene(s) it overlaps and correctly excludes the ones that don't overlap any gene.
+> Construct one SV perfectly tagged by local diplotype and one that segregates within every
+> sufficiently represented diplotype. Assert high information gain for the first and a high
+> within-diplotype mixed fraction for the second. Confirm that PCA tables are deterministic.
 
 **Wire to next stage:**
-> Confirm Stage 9 reads this stage's ranked DUP/INV table for the report section specifically called out for Maria (duplications) and Alistair (inversions), and that the table is sorted/filterable by SV type so each of them can look at just their type of interest.
+> Stage 9 should report blocks and SVs at both extremes: portable/taggable variation and variation
+> that subdivides existing hashes. Population-colored PCA remains a QC figure.
+
+### Stage 8: Consequence-aware candidate annotation
+
+**Implement:**
+> Write `pipeline/stage8_candidate_annotation.py` to annotate Stage 6 candidates against a GTF.
+> Interpret overlap by SV type: exon and transcript loss for DEL, complete or partial gene overlap
+> for DUP, breakpoint disruption separately from genes merely contained inside INV spans, and
+> breakpoint context for INS. Rank candidates using transparent evidence fields including Stage 6
+> association pattern/strength, population classification when available, call precision/filter,
+> and consequence class. Run on DEL/INS now; preserve the same contract for future DUP/INV inputs.
+> Constraint, regulatory, phenotype/GWAS, repeat-context, and well-controlled selection evidence
+> can be joined later without reducing them to a single proximity boolean.
+
+**Test:**
+> Use a tiny synthetic GTF with exons and genes around DEL, INS, DUP, and INV examples. Assert that
+> exon loss, insertion breakpoint context, duplication overlap, and inversion breakpoint disruption
+> are distinguished, and that a gene only contained within an inversion is not described as a
+> breakpoint-disrupted gene.
+
+**Wire to next stage:**
+> Stage 9 should expose a filterable candidate table by SV type and evidence category, with DEL/INS
+> available for the present callset and DUP/INV views enabled when those calls are available.
 
 ---
 
