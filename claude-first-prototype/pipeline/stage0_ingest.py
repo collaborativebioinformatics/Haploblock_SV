@@ -638,6 +638,8 @@ def generate_synthetic_haploblocks(n_blocks: int, rng: np.random.Generator) -> p
     block_idx = 0
     for chrom_i, chrom in enumerate(CHROMS):
         blocks_this_chrom = base + (1 if chrom_i < remainder else 0)
+        # start each chromosome's covered span a few Mb in, so there is a
+        # "before the first block" region for outside_block SVs to land in
         pos = int(rng.integers(1_000_000, 5_000_000))
         for _ in range(blocks_this_chrom):
             length = int(rng.integers(50_000, 500_000))
@@ -658,7 +660,7 @@ def generate_synthetic_haploblocks(n_blocks: int, rng: np.random.Generator) -> p
                     "cluster_diff_score": round(cluster_diff_score, 4),
                 }
             )
-            pos = end + int(rng.integers(20_000, 200_000))  # gap between blocks
+            pos = end  # blocks are contiguous within a chromosome, like real haploblocks.org data
             block_idx += 1
     return pd.DataFrame(rows)
 
@@ -681,10 +683,14 @@ def generate_synthetic_svs(
     n_svs: int,
     haploblocks: pd.DataFrame,
     samples: pd.DataFrame,
-    boundary_bp: int,
     rng: np.random.Generator,
 ) -> pd.DataFrame:
     sample_pops = dict(zip(samples["sample_id"], samples["superpopulation"]))
+    blocks_by_chrom = {
+        c: g.sort_values("start").reset_index(drop=True)
+        for c, g in haploblocks.groupby("chrom", sort=False)
+    }
+    chroms = list(blocks_by_chrom)
     rows = []
     for i in range(n_svs):
         sv_type = rng.choice(SV_TYPES, p=SV_TYPE_WEIGHTS)
@@ -695,20 +701,29 @@ def generate_synthetic_svs(
         interval_length = min(interval_length, 50_000)
 
         placement = rng.choice(["within", "boundary", "outside"], p=[0.6, 0.2, 0.2])
-        block = haploblocks.iloc[int(rng.integers(0, len(haploblocks)))]
-        chrom = block["chrom"]
-        if placement == "within":
-            margin = boundary_bp * 2
-            span = max(1, (block["end"] - block["start"]) - 2 * margin - interval_length)
-            start = int(block["start"] + margin + rng.integers(0, span + 1))
-        elif placement == "boundary":
-            # keep the SV's start within N/2 of the edge so it reliably falls
-            # inside the boundary-crossing zone downstream, not just near it
-            edge = block["start"] if rng.random() < 0.5 else block["end"]
-            start = int(edge + rng.integers(-boundary_bp // 2, boundary_bp // 2))
-        else:  # outside: drop it in the gap just after this block
-            start = int(block["end"] + boundary_bp * 3 + rng.integers(0, 10_000))
-        end = start + interval_length
+        chrom = chroms[int(rng.integers(0, len(chroms)))]
+        blocks = blocks_by_chrom[chrom]
+
+        if placement == "boundary" and len(blocks) >= 2:
+            # straddle a shared edge: SV overlaps block k and block k+1
+            k = int(rng.integers(0, len(blocks) - 1))
+            edge = int(blocks.loc[k, "end"])  # == blocks.loc[k + 1, "start"] (contiguous)
+            half = max(1, interval_length // 2)
+            start = edge - half
+            end = edge + max(1, interval_length - half)
+        elif placement == "outside":
+            if rng.random() < 0.5:  # before the first block on this chromosome
+                end = int(blocks.loc[0, "start"]) - 1 - int(rng.integers(0, 20_000))
+                start = end - interval_length
+            else:  # after the last block
+                start = int(blocks.iloc[-1]["end"]) + int(rng.integers(1, 20_000))
+                end = start + interval_length
+        else:  # within a single block, not touching either edge
+            k = int(rng.integers(0, len(blocks)))
+            b_start, b_end = int(blocks.loc[k, "start"]), int(blocks.loc[k, "end"])
+            usable = (b_end - b_start) - interval_length
+            start = b_start + 1 + int(rng.integers(0, max(1, usable - 1))) if usable > 2 else b_start
+            end = min(start + interval_length, b_end)
         # plausible inserted-sequence length (Alu- to L1-scale), independent of
         # the 1bp reference interval -- mirrors real dbVar INS records, where
         # length lives with the call/insertion, not the reference coordinates
@@ -932,7 +947,7 @@ def main(argv=None) -> None:
             sources_used["sample_metadata"] = "real (inferred from dbVar SAMPLE ids)"
     else:
         log.info("Using SYNTHETIC SV calls (n=%d) -- no usable SV source available", args.n_svs)
-        sv_calls = generate_synthetic_svs(args.n_svs, haploblocks, samples, args.boundary_distance_bp, rng)
+        sv_calls = generate_synthetic_svs(args.n_svs, haploblocks, samples, rng)
         sources_used["sv_calls"] = "synthetic"
 
     sv_calls = normalize_chrom_column(sv_calls)

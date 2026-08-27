@@ -16,7 +16,7 @@ The expected deliverable is a reusable, parameterized pipeline plus a per-haplob
 |---|---|---|---|
 | 0 | Data ingestion & harmonization | Fetch/parse the nstd152 VCF (or ingest any multi-sample SV VCF via `--vcf`, keeping the raw GT), haploblock boundaries from data.haploblocks.org, and sample→population metadata; write one shared config (thresholds, genome build, seeds) | Implemented |
 | 1 | QC & normalization | Filter SVs on size and coordinate sanity, dedup, validate the haploblock BED is sorted/non-overlapping. IMPRECISE calls are **kept by default** (dropping them removes every inversion); `--drop-imprecise` opts back in | Implemented |
-| 2 | SV × haploblock intersection | Check every SV against every haploblock on its chromosome; label `within_block` / `boundary_crossing` / `outside_block`. Blocks are contiguous within their span but do not reach the telomeres, so `outside_block` = telomeric/centromeric SVs (logged with a before/after/in-gap breakdown) | Implemented |
+| 2 | SV × haploblock intersection | Check every SV against every haploblock on its chromosome; classify by overlap count — 1 block = `within_block`, ≥ 2 = `boundary_crossing` (spans a shared edge), 0 = `outside_block`. No proximity threshold. Blocks are contiguous within their span but do not reach the telomeres, so `outside_block` = telomeric/centromeric SVs (logged with a before/after/in-gap breakdown) | Implemented |
 | ~~3~~ | ~~Boundary enrichment test~~ | Removed from the pipeline (see "Descoped / future steps"). Stage numbers 4–9 are kept as-is for continuity with the prompts | Removed |
 | 4 | Common vs. population-specific SV classification | Allele frequency per population from `sample_metadata.tsv` (whatever populations it holds — no fixed AFR/AMR/EAS/EUR/SAS list). Per `sv_id × sv_type × haploblock_id`: the per-population AF and a category of `common`, `specific_to_population`, or `other` (too little data) | Proposed |
 | 5 | Per-haploblock SV-type enrichment | Per-haploblock × SV-type count matrix; overall per-type rate = total SVs of that type / total haploblock length; expected count per block from its length; Poisson test observed vs. expected; Benjamini-Hochberg FDR across all block × type tests; flag q < 0.05 | Proposed |
@@ -118,7 +118,7 @@ INFO: Wrote 49958/50601 SVs and 39113 haploblocks to .../stage1_output
 
 `pipeline/stage2_intersect.py` is implemented and working — **pure Python/numpy, no bedtools/pybedtools**. For each chromosome it compares *every* SV against *every* haploblock on that chromosome with a vectorised interval comparison (an `[n_sv, n_block]` boolean grid). There is no sorted-search window that could drop a match if block order were ever off; blocks are still re-validated as sorted and non-overlapping, but the classification no longer depends on that. Genome-wide, ~50k SVs against 39,113 haploblocks classify in ~2 s.
 
-Each SV gets `position_class` (`within_block` / `boundary_crossing` / `outside_block`) and `haploblock_id` (comma-joined if it touches more than one block). A block only counts as fully "within" when the SV is ≥ N bp (`boundary_distance_bp`) from *both* its edges.
+Each SV gets `position_class` and `haploblock_id` from a pure **overlap count**: overlaps 0 blocks → `outside_block`; exactly 1 → `within_block`; ≥ 2 → `boundary_crossing` (the SV interval physically straddles the shared edge(s) between contiguous blocks, so `haploblock_id` lists all of them). There is **no proximity threshold** — an SV sitting 600 bp inside one block, close to an edge but not crossing it, is `within_block`, not `boundary_crossing`. (`--boundary-distance-bp` / `thresholds.boundary_distance_bp` are still accepted so older configs don't error, but are ignored.)
 
 **On `outside_block` — not a bug:** real data.haploblocks.org blocks are contiguous *within the span they cover* (no inter-block gaps, confirmed genome-wide), but that span does not reach the telomeres/centromere (e.g. chr21's blocks span ~14.2–46.2 Mb). SVs before the first block or after the last block on their chromosome are legitimately `outside_block`. Stage 2 logs a breakdown — `before_first_block` / `after_last_block` / `in_inter_block_gap` / `no_blocks_on_chrom` — so a genuine gap in the haploblock table (a non-zero `in_inter_block_gap`) would stand out instead of hiding among the expected telomeric calls.
 
@@ -129,12 +129,12 @@ Each SV gets `position_class` (`within_block` / `boundary_crossing` / `outside_b
 
 **Expected output** on the real genome-wide haploblocks + nstd152 data (imprecise kept in Stage 1):
 ```
-INFO: Position classification (N=5000bp): within_block=37642 boundary_crossing=9287 outside_block=3029
-INFO: 9240 SV(s) matched more than one haploblock (span a shared edge)
-INFO: outside_block breakdown: before_first_block=1685 after_last_block=1329 in_inter_block_gap=0 no_blocks_on_chrom=15
-INFO: Wrote 49958 annotated SVs and 39113 haploblocks to .../stage2_output
+INFO: Note: boundary_distance_bp is no longer used -- an SV is boundary_crossing iff it overlaps >=2 haploblocks
+INFO: Position classification: within_block=45393 boundary_crossing=1519 outside_block=3046
+INFO: 1519 SV(s) overlap more than one haploblock (span a shared edge)
+INFO: outside_block breakdown: before_first_block=1692 after_last_block=1339 in_inter_block_gap=0 no_blocks_on_chrom=15
 ```
-`in_inter_block_gap=0` is the check that matters: every `outside_block` SV is a telomeric call before the first block or after the last, or (15 of them) on a chromosome with no haploblocks at all (chrY) — none fell in a gap *between* blocks, confirming the haploblock table is contiguous and the matching has no ordering bug.
+`in_inter_block_gap=0` is the check that matters: every `outside_block` SV is a telomeric call before the first block or after the last, or (15 of them) on a chromosome with no haploblocks at all (chrY) — none fell in a gap *between* blocks, confirming the haploblock table is contiguous and the matching has no ordering bug. Only 1,519 SVs genuinely straddle a block edge; the rest sit cleanly inside one block.
 
 ## Tests
 

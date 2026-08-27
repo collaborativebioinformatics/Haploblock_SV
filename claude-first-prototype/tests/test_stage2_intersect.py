@@ -1,10 +1,10 @@
 """Tests for pipeline/stage2_intersect.py.
 
 Two kinds of coverage:
-  - a hand-crafted tiny table (two adjacent blocks + a lone block on another
-    chromosome) that exercises within_block / boundary_crossing (both the
-    "near one edge" and "spans two blocks" cases) / outside_block exactly,
-    per the classification rules in stage2_intersect.py's module docstring.
+  - a hand-crafted tiny table exercising the overlap-count rule exactly:
+    an SV inside one block (even close to an edge) is within_block; only an
+    SV that overlaps >=2 blocks is boundary_crossing; an SV overlapping no
+    block is outside_block.
   - an integration check chaining off Stage 0 -> Stage 1's synthetic
     (offline) output, to confirm the --config wiring actually works.
 """
@@ -44,24 +44,22 @@ def handcrafted_output(tmp_path_factory):
         [
             {"haploblock_id": "hbA", "chrom": "chr1", "start": 1000, "end": 2000, "n_snps": 100, "n_clusters": 3, "hash_length": 20, "cluster_diff_score": 0.1},
             {"haploblock_id": "hbB", "chrom": "chr1", "start": 2000, "end": 3000, "n_snps": 100, "n_clusters": 3, "hash_length": 20, "cluster_diff_score": 0.1},
-            # isolated: >= BOUNDARY_BP away from both hbA and hbB, to test a genuinely
-            # one-sided "near edge" case distinct from the hbA/hbB shared (contiguous) edge
-            {"haploblock_id": "hbD", "chrom": "chr1", "start": 3500, "end": 4000, "n_snps": 100, "n_clusters": 3, "hash_length": 20, "cluster_diff_score": 0.1},
             {"haploblock_id": "hbC", "chrom": "chr2", "start": 5000, "end": 6000, "n_snps": 100, "n_clusters": 3, "hash_length": 20, "cluster_diff_score": 0.1},
         ]
     )
     sv_calls = pd.DataFrame(
         [
-            # fully inside hbA, far (>=100bp) from both edges -> within_block
+            # fully inside hbA, far from both edges -> within_block
             {"sv_id": "sv_within", "chrom": "chr1", "start": 1400, "end": 1600, "sv_type": "DEL", "imprecise": False, "length": 200, "SAMP0": 1},
-            # straddles the hbA/hbB shared edge at 2000 -> boundary_crossing, both ids
+            # straddles the hbA/hbB shared edge at 2000 -> overlaps 2 blocks -> boundary_crossing
             {"sv_id": "sv_span", "chrom": "chr1", "start": 1990, "end": 2010, "sv_type": "DEL", "imprecise": False, "length": 20, "SAMP0": 1},
-            # fully inside hbA, 40bp from its right edge (< BOUNDARY_BP) -- hbB starts
-            # exactly there (contiguous), so hbB is also "near" -> boundary_crossing, both ids
-            {"sv_id": "sv_near_shared_edge", "chrom": "chr1", "start": 1900, "end": 1960, "sv_type": "DUP", "imprecise": False, "length": 60, "SAMP0": 0},
-            # fully inside hbD, 40bp from its left edge, with no neighboring block within
-            # BOUNDARY_BP on either side -> boundary_crossing, hbD only
-            {"sv_id": "sv_near_isolated_edge", "chrom": "chr1", "start": 3540, "end": 3560, "sv_type": "DUP", "imprecise": False, "length": 20, "SAMP0": 0},
+            # fully inside hbA, only 40bp from its right edge but NOT crossing it
+            # (end 1960 < 2000) -> overlaps 1 block -> within_block (regression: this
+            # used to be mislabeled boundary_crossing by a proximity rule)
+            {"sv_id": "sv_near_edge_not_crossing", "chrom": "chr1", "start": 1900, "end": 1960, "sv_type": "DUP", "imprecise": False, "length": 60, "SAMP0": 0},
+            # a few hundred bp inside hbB, near its left (shared) edge, not crossing
+            # -> within_block, hbB only  (the exact shape of the reported bug)
+            {"sv_id": "sv_just_inside_second_block", "chrom": "chr1", "start": 2661, "end": 2662, "sv_type": "INS", "imprecise": False, "length": 300, "SAMP0": 1},
             # far from every block on chr1 -> outside_block
             {"sv_id": "sv_far", "chrom": "chr1", "start": 100, "end": 200, "sv_type": "INV", "imprecise": False, "length": 100, "SAMP0": 0},
             # chromosome with zero haploblocks -> outside_block
@@ -104,16 +102,19 @@ def test_boundary_crossing_spans_two_blocks(handcrafted_output):
     assert set(row["haploblock_id"].split(",")) == {"hbA", "hbB"}
 
 
-def test_boundary_crossing_near_shared_edge_lists_both_neighbors(handcrafted_output):
-    row = handcrafted_output.loc["sv_near_shared_edge"]
-    assert row["position_class"] == "boundary_crossing"
-    assert set(row["haploblock_id"].split(",")) == {"hbA", "hbB"}
+def test_near_edge_but_not_crossing_is_within_block(handcrafted_output):
+    row = handcrafted_output.loc["sv_near_edge_not_crossing"]
+    assert row["position_class"] == "within_block"
+    assert row["haploblock_id"] == "hbA"
 
 
-def test_boundary_crossing_near_isolated_edge_lists_one_block(handcrafted_output):
-    row = handcrafted_output.loc["sv_near_isolated_edge"]
-    assert row["position_class"] == "boundary_crossing"
-    assert row["haploblock_id"] == "hbD"
+def test_just_inside_second_block_is_within_block(handcrafted_output):
+    # regression: an SV that lies wholly inside the second of two contiguous
+    # blocks, a few hundred bp from the shared edge, must be within_block --
+    # not boundary_crossing with both block ids.
+    row = handcrafted_output.loc["sv_just_inside_second_block"]
+    assert row["position_class"] == "within_block"
+    assert row["haploblock_id"] == "hbB"
 
 
 def test_outside_block_far_from_blocks(handcrafted_output):
@@ -127,9 +128,9 @@ def test_outside_block_no_haploblocks_on_chromosome(handcrafted_output):
 
 
 def test_outside_block_breakdown_is_logged(tmp_path):
-    """The handcrafted set has one SV before chr1's block span (sv_far) and one
-    on a chromosome with no blocks (sv_no_chrom); the breakdown log must
-    separate those and report zero genuine inter-block-gap SVs.
+    """One SV before the block span, one after it, one on a chromosome with no
+    blocks: the breakdown log must separate those and report zero genuine
+    inter-block-gap SVs.
     """
     in_dir = tmp_path / "in"
     in_dir.mkdir()
