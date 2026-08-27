@@ -1,0 +1,20 @@
+{
+  "vcf": "/Users/lynn.ly/projects/hackathon/Haploblock_SV/input/1kgp_ont_cohort.postfilter.full.vcf.gz",
+  "chrom": "chr21",
+  "records_written": 83149,
+  "sv_id_max_length": 80,
+  "sv_ids_shortened": 4118,
+  "samples": 403,
+  "sample_ids_changed": 23,
+  "filter_counts": {
+    "GT": 1671,
+    "PASS": 81478
+  },
+  "genotype_counts": {
+    "./.": 1604669,
+    "0|0": 31634191,
+    "0|1": 108420,
+    "1|0": 108694,
+    "1|1": 53073
+  }
+}
