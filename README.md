@@ -2,15 +2,36 @@
 
 # Haploblock_SV
 
+# Quickstart
+Install dependencies:
+```bash
+pip install -r claude-first-prototype/requirements.txt
+```
+
+Run the pipeline:
+```bash
+python claude-first-prototype/pipeline/stage1_cluster_aware.py
+```
+
+The current workflow starts from a previously merged VCF and writes chromosome-specific SV-to-cluster association tables into `stage1_output/`.
+See [claude-first-prototype/README.md](claude-first-prototype/README.md) for output fields, interpretation, QC, and the optional boundary-position analysis.
+Stage 0 is currently a placeholder to download single-sample VCFs from 1kgp and merge them into a cohort VCF.
+
 # Overview
 
-We aim to reveal how structural variation is organized within and around haploblocks, and what that says about population structure.
+We aim to reveal how structural variation is organized within and around haploblocks, and what that may tell us about haplotype and population structure.
 
-- Follow up on previous projects: [haploblocks.org](https://haploblocks.org) and [data.haploblocks.org](https://data.haploblocks.org)
-- Call SVs (DEL, DUP, INV, INS) within haploblocks (check if any lands at haploblock boundaries), then split them into common and population-specific sets
+This project follows [haploblocks.org](https://haploblocks.org) and [data.haploblocks.org](https://data.haploblocks.org), which determined haploblock boundaries and clustered haplotypes within each block using 1000 Genomes small variants. Those results did not incorporate structural variants, so they cannot directly identify which existing haplotype clusters carry a particular SV.
+
+So far implemented: cluster-aware preprocessing that combines cohort SV genotypes with those existing cluster memberships and probabilistically assigns SVs to one or more clusters. This is necessary because the VCF and haploblock clusters were phased independently, so their `hap0` and `hap1` labels cannot be matched directly.
+
+The wider pipeline is exploratory rather than a fixed production analysis. It is intended to test biological expectations about SVs and haploblocks—for example, whether SVs consistently mark particular haplotype clusters, whether some blocks or clusters contain unusual SV patterns, and whether those patterns reflect population structure. The downstream analyses will evolve as these assumptions are evaluated.
+
+- Infer which haplotype clusters within each haploblock carry each SV (currently DEL and INS)
+- Separately, if useful, check whether SVs fall near or across haploblock boundaries
 - Check if specific haploblocks are prone to particular SV types
 - Check if these SVs correlate with 1000 Genomes population clusters
-- Check if whether any duplications (Maria) and/or inversions (Alistair) stand out
+- Check whether any duplications (Maria) and/or inversions (Alistair) stand out when a suitable callset is available
 - Wrap it up in a re-usable and scalable pipeline
 
 
@@ -18,7 +39,7 @@ We aim to reveal how structural variation is organized within and around haplobl
 
 ## Flowchart
 
-![flowchart_haploblock_SV.png](flowchart_haploblock_SV.png)
+![Cluster-aware Haploblock SV workflow](flowchart_haploblock_SV.png)
 
 # Methods
 
