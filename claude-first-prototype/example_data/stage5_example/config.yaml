@@ -1,0 +1,6 @@
+genome_build: GRCh38
+thresholds:
+  q_threshold: 0.05
+paths:
+  sv_calls: sv_calls.tsv
+  haploblocks: haploblocks.tsv

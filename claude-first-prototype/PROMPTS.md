@@ -2,7 +2,7 @@
 
 Ready-to-use prompts for an agentic coding assistant, organized by pipeline stage and by day (see `README.md` for the full plan). Each prompt is self-contained enough to hand to a fresh agent session — it restates the relevant context rather than assuming prior conversation.
 
-Shared context to paste into any session if it doesn't already have it: *"We're building a Python pipeline for a hackathon that studies structural variants (SVs: DEL/DUP/INV/INS) within 'haploblocks' — LD-defined haplotype-hash regions from data.haploblocks.org. SV calls come from dbVar study nstd152 (Chaisson et al. 2019), or from an arbitrary multi-sample SV VCF supplied to Stage 0 via `--vcf`. Population labels come from whatever is in `sample_metadata.tsv` (a `population` column) — never a hardcoded list of the five 1000G superpopulations. The pipeline is a sequence of independently-runnable, parameterized stages under `pipeline/`, each a script taking input paths and config values as CLI args — never hardcoded paths. Stages 0–2 and Stage 4 are implemented; Stage 3 was removed (numbering keeps 4–9); Stages 5–9 are specs. See README.md for the full stage list."*
+Shared context to paste into any session if it doesn't already have it: *"We're building a Python pipeline for a hackathon that studies structural variants (SVs: DEL/DUP/INV/INS) within 'haploblocks' — LD-defined haplotype-hash regions from data.haploblocks.org. SV calls come from dbVar study nstd152 (Chaisson et al. 2019), or from an arbitrary multi-sample SV VCF supplied to Stage 0 via `--vcf`. Population labels come from whatever is in `sample_metadata.tsv` (a `population` column) — never a hardcoded list of the five 1000G superpopulations. The pipeline is a sequence of independently-runnable, parameterized stages under `pipeline/`, each a script taking input paths and config values as CLI args — never hardcoded paths. Stages 0–2, 4, and 5 are implemented; Stage 3 was removed (numbering keeps 4–9); Stages 6–9 are specs. See README.md for the full stage list."*
 
 ---
 
@@ -77,7 +77,9 @@ Shared context to paste into any session if it doesn't already have it: *"We're 
 > Write a pytest test with synthetic data: several haploblocks of varying length with SV counts proportional to length (should NOT be flagged after the length adjustment), plus one haploblock with an artificially inflated count for one SV type (should be flagged after FDR correction). Assert the inflated block×type is flagged and the proportional ones are not, at a fixed seed.
 
 **Wire to next stage:**
-> Confirm Stage 9 (integration) reads this stage's flagged table to build the "haploblocks prone / resistant to a particular SV type" section of the final report.
+> Stage 9 (integration) reads `sv_type_enrichment.tsv` (path via Stage 5's `config.yaml` → `paths.sv_type_enrichment`) for the "haploblocks prone / resistant to a particular SV type" section. The table has no direction column — Stage 9 derives it from the sign of `observed_count − expected_count` on rows where `flagged` is true: `observed > expected` → *prone*, `observed < expected` → *resistant*. The per-block type-enrichment heatmap uses `log2((observed_count + 0.5) / (expected_count + 0.5))` per (haploblock, sv_type) cell, with flagged cells marked.
+
+**Implemented:** `pipeline/stage5_type_enrichment.py`. `outside_block` SVs dropped; `boundary_crossing` SVs with a comma-joined `haploblock_id` counted once per spanned block. Exact two-sided Poisson test (`2·min(P(X≤obs), P(X≥obs))`, capped at 1); BH-FDR via `scipy.stats.false_discovery_control` (statsmodels fallback) across the **full** haploblocks × observed-types grid, zeros included. `--q-threshold` (default = config's `thresholds.q_threshold`, else 0.05). Output `sv_type_enrichment.tsv` = `haploblock_id, sv_type, observed_count, expected_count, p_value, q_value, flagged`, sorted by `q_value`. Example + generator: `example_data/stage5_example/`.
 
 ---
 
@@ -129,4 +131,10 @@ Shared context to paste into any session if it doesn't already have it: *"We're 
 > Review `README.md`'s pipeline overview table against the actual `pipeline/` scripts as implemented, and update either the README or the code so stage names, inputs, and outputs match exactly. Add a `--help` docstring/argparse description to every stage script consistent with the README's one-line purpose for that stage.
 
 **Demo / report:**
-> Write `pipeline/stage9_integrate.py` that aggregates all prior stages' output tables into one per-haploblock summary (SV-type composition, per-type enrichment flag, population-specificity density, cluster-correlation value, top DUP/INV hits) and renders it as a Jupyter notebook or a static HTML report (via Jinja2 + matplotlib/seaborn plots) — one figure per question (per-block type-enrichment heatmap, population-correlation scatter, SV-based PCA/UMAP scatter colored by population, DUP/INV ranked table).
+> Write `pipeline/stage9_integrate.py` that aggregates the prior stages' output tables into one per-haploblock summary and renders it as a Jupyter notebook or a static HTML report (Jinja2 + matplotlib/seaborn). Inputs, each located via its stage's `config.yaml` `paths.*` entry:
+> - Stage 5 `sv_type_enrichment.tsv` → the "haploblocks prone / resistant to a particular SV type" section: filter `flagged == True`, split by sign of `observed_count − expected_count` (`>` = prone, `<` = resistant), list `haploblock_id, sv_type, observed_count, expected_count, q_value`; and a per-block × SV-type heatmap of `log2((observed_count + 0.5)/(expected_count + 0.5))` with flagged cells marked.
+> - Stage 4 `sv_af_classification.tsv` → per-haploblock population-specificity density (share of SVs with `sv_category == "specific_to_population"`).
+> - Stage 6 correlation coefficient / p-value + per-block table → population-correlation scatter.
+> - Stage 7 cluster-assignments table + PNGs → SV-based PCA/UMAP figure.
+> - Stage 8 ranked DUP/INV table → the DUP/INV hits section.
+> Emit one per-haploblock summary row per block with all of the above columns populated.

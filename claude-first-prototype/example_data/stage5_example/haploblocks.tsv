@@ -1,0 +1,7 @@
+haploblock_id	chrom	start	end	n_snps	n_clusters	hash_length	cluster_diff_score
+hb1	chr1	0	12000				
+hb2	chr1	12000	32000				
+hb3	chr1	32000	62000				
+hb4	chr1	62000	110000				
+hb5	chr1	110000	180000				
+hb6_small	chr1	180000	180800				

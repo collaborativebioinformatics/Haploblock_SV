@@ -1,6 +1,6 @@
 # Haploblock_SV — Structural Variants Within Haploblocks
 
-Prototype pipeline plan for the Structural Variants Hackathon at Baylor College of Medicine, August 25–28, 2026. Stages 0–2 and Stage 4 are implemented and run end-to-end on the example data (see the "Prototype" sections below and `PROMPTS.md` for the per-stage handoff prompts). Stages 5–9 are still prompt specs pending biological review. Stage 3 (boundary enrichment) has been dropped from the pipeline — see "Descoped / future steps".
+Prototype pipeline plan for the Structural Variants Hackathon at Baylor College of Medicine, August 25–28, 2026. Stages 0–2, 4, and 5 are implemented and run end-to-end on the example data (see the "Prototype" sections below and `PROMPTS.md` for the per-stage handoff prompts). Stages 6–9 are still prompt specs pending biological review. Stage 3 (boundary enrichment) has been dropped from the pipeline — see "Descoped / future steps".
 
 ## Introduction
 
@@ -19,7 +19,7 @@ The expected deliverable is a reusable, parameterized pipeline plus a per-haplob
 | 2 | SV × haploblock intersection | Check every SV against every haploblock on its chromosome; classify by overlap count — 1 block = `within_block`, ≥ 2 = `boundary_crossing` (spans a shared edge), 0 = `outside_block`. No proximity threshold. Blocks are contiguous within their span but do not reach the telomeres, so `outside_block` = telomeric/centromeric SVs (logged with a before/after/in-gap breakdown) | Implemented |
 | ~~3~~ | ~~Boundary enrichment test~~ | Removed from the pipeline (see "Descoped / future steps"). Stage numbers 4–9 are kept as-is for continuity with the prompts | Removed |
 | 4 | Common vs. population-specific SV classification | Alt-allele frequency per population from `sample_metadata.tsv` (whatever populations it holds — no fixed AFR/AMR/EAS/EUR/SAS list). Per `sv_id × sv_type × haploblock_id`: the per-population AF and a category of `common`, `specific_to_population`, or `other` (too little data / rare) | Implemented |
-| 5 | Per-haploblock SV-type enrichment | Per-haploblock × SV-type count matrix; overall per-type rate = total SVs of that type / total haploblock length; expected count per block from its length; Poisson test observed vs. expected; Benjamini-Hochberg FDR across all block × type tests; flag q < 0.05 | Proposed |
+| 5 | Per-haploblock SV-type enrichment | Per-haploblock × SV-type count matrix; overall per-type rate = total SVs of that type / total haploblock length; expected count per block from its length; exact two-sided Poisson test observed vs. expected; Benjamini-Hochberg FDR across all block × type cells; flag q < 0.05 | Implemented |
 | 6 | Population-cluster correlation | Compare Stage 4's population-specific SV patterns against the predefined SNV-based haploblock clusters; `--clusters` builds the cluster table from a data.haploblocks.org clusters file | Proposed |
 | 7 | SV-based population structure reconstruction | Per-sample × per-haploblock SV matrix → PCA/UMAP; output **PNG plots and cluster assignments only**, colored by the populations in `sample_metadata.tsv` | Proposed |
 | 8 | Duplication/inversion gene overlay | Gene overlap for recurrent / population-specific DUP and INV calls | Proposed |
@@ -158,9 +158,29 @@ INFO: Wrote 20 rows (5 SVs x 4 populations) to .../stage4_output/sv_af_classific
 ```
 Output is a tidy/long table — one row per (SV × population) with `af`, `n_called`, `pop_has_data`, and the per-SV `sv_category` / `specific_to_population` / `other_reason`. On the real nstd152 data (9 samples, 3 populations, n=3 each) the classification runs in seconds over ~50k SVs but is badly underpowered — with 6 alleles per population, AF steps are ~0.17 and "near-zero < 0.01" only means "exactly absent", so almost everything lands in `common` or `specific_to_population`. A wider cohort via Stage 0's `--vcf` is what makes this stage meaningful.
 
+## Prototype: Stage 5 (per-haploblock SV-type enrichment)
+
+`pipeline/stage5_type_enrichment.py` reads Stage 2's annotated `sv_calls.tsv` + `haploblocks.tsv` and, for every (haploblock × SV type) cell, tests whether the block carries more/fewer SVs of that type than its **length** alone predicts. `outside_block` SVs are dropped; a `boundary_crossing` SV with a comma-joined `haploblock_id` is counted once in **each** block it spans. Per type: `rate = total assigned SVs of that type / total haploblock length`; `expected[block] = rate × length(block)`; `p` = exact two-sided Poisson test of observed vs. mean `expected`; `q` = Benjamini-Hochberg FDR across **all** cells (zeros included — the honest denominator; a min-count pre-filter is future work); `flagged` = `q < --q-threshold` (default 0.05).
+
+**Run command** (chains off Stage 2's config, or use the bundled example):
+```
+~/pyenvs/pyEnv_SVhack2026/bin/python pipeline/stage5_type_enrichment.py \
+  --config example_data/stage5_example/config.yaml --out-dir stage5_output
+```
+`example_data/stage5_example/` is generated by `make_example.py` there: 6 contiguous haploblocks with DEL/INS/INV counts drawn Poisson-proportional to block length, plus an artificial 6-INV spike in an 800 bp block.
+
+**Expected output** — only the spike is flagged:
+```
+INFO: 18 (haploblock x SV-type) cells tested (6 haploblocks x 3 types); 3 cell(s) with observed=0
+INFO: flagged (q < 0.05): 1
+INFO:   hb6_small  INV  observed=6  expected=0.053  q=1.07e-09
+INFO: Wrote 18 rows to .../stage5_output/sv_type_enrichment.tsv
+```
+Columns: `haploblock_id, sv_type, observed_count, expected_count, p_value, q_value, flagged` (sorted by `q_value`). On a genome-wide run the grid is `n_haploblocks × n_types` (~156k rows for nstd152), mostly `observed=0`; BH over that many tests is stringent by design — restrict to blocks with data (descoped min-count filter) if you need more power.
+
 ## Tests
 
-`tests/test_stage0_ingest.py`, `tests/test_stage1_qc.py`, `tests/test_stage2_intersect.py`, and `tests/test_stage4_classify_af.py` run the stages end-to-end on synthetic / small example data — plus a `--vcf` path check, the imprecise-kept-by-default / `--drop-imprecise` behaviour, Stage 2's exact classification rules and `outside_block` breakdown, and Stage 4's category logic on both GT-string and dosage-int genotypes. Run with:
+`tests/test_stage0_ingest.py`, `tests/test_stage1_qc.py`, `tests/test_stage2_intersect.py`, `tests/test_stage4_classify_af.py`, and `tests/test_stage5_type_enrichment.py` run the stages end-to-end on synthetic / small example data — plus a `--vcf` path check, the imprecise-kept-by-default / `--drop-imprecise` behaviour, Stage 2's exact classification rules and `outside_block` breakdown, Stage 4's category logic on both GT-string and dosage-int genotypes, and Stage 5's Poisson+FDR flagging of an injected spike vs. length-proportional counts. Run with:
 ```
 ~/pyenvs/pyEnv_SVhack2026/bin/python -m pytest tests/ -v
 ```
