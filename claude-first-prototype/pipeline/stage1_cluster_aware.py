@@ -8,13 +8,15 @@ directory, and records their paths in config.yaml.
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 import sys
 from pathlib import Path
 
 import yaml
 
-from match_svs_to_clusters import ALL_CHROMS, main as run_cluster_aware, normalize_chrom
+from match_svs_to_clusters import ALL_CHROMS, run as run_cluster_aware
+from sv_contract import canonical_sample_id, normalize_chrom
 
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -30,9 +32,40 @@ def parse_chroms(value: str) -> list[str]:
     return [normalize_chrom(chrom.strip()) for chrom in value.split(",") if chrom.strip()]
 
 
+def normalize_sample_metadata(source: Path, samples_path: Path, destination: Path) -> None:
+    with samples_path.open() as handle:
+        sample_rows = list(csv.DictReader(handle, delimiter="\t"))
+    original_to_canonical = {
+        row["original_sample_id"]: row["sample_id"]
+        for row in sample_rows
+    }
+
+    with source.open() as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        fieldnames = reader.fieldnames
+        metadata_by_sample = {}
+        for row in reader:
+            row["sample_id"] = original_to_canonical.get(
+                row["sample_id"], canonical_sample_id(row["sample_id"])
+            )
+            metadata_by_sample[row["sample_id"]] = row
+
+    with destination.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t", lineterminator="\n")
+        writer.writeheader()
+        for sample in sample_rows:
+            writer.writerow(metadata_by_sample[sample["sample_id"]])
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vcf", type=Path, default=DEFAULT_VCF)
+    parser.add_argument(
+        "--sample-metadata",
+        type=Path,
+        default=None,
+        help="Optional sample-to-population table produced by Stage 0",
+    )
     parser.add_argument("--out-dir", type=Path, default=Path("stage1_output"))
     parser.add_argument("--chroms", default="all", help="Comma-separated chromosomes or 'all' for chr1-22,X")
     parser.add_argument("--cluster-base-url", default="https://data.haploblocks.org/haploblock_hashes/1000G")
@@ -54,25 +87,33 @@ def main(argv: list[str] | None = None) -> None:
     chroms = parse_chroms(args.chroms)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    cluster_args = [
-        "--vcf", str(args.vcf),
-        "--out-dir", str(args.out_dir),
-        "--chroms", ",".join(chroms),
-        "--cluster-base-url", args.cluster_base_url,
-        "--chrom-workers", str(args.chrom_workers),
-        "--download-workers", str(args.download_workers),
-        "--retries", str(args.retries),
-        "--max-sv-id-length", str(args.max_sv_id_length),
-        "--association-threshold", str(args.association_threshold),
-        "--posterior-threshold", str(args.posterior_threshold),
-        "--max-iterations", str(args.max_iterations),
-        "--tolerance", str(args.tolerance),
-    ]
-    if args.cluster_root is not None:
-        cluster_args.extend(["--cluster-root", str(args.cluster_root)])
-
     log.info("Running cluster-aware preprocessing for %d chromosome(s)", len(chroms))
-    run_cluster_aware(cluster_args)
+    run_cluster_aware(
+        argparse.Namespace(
+            vcf=args.vcf,
+            chroms=",".join(chroms),
+            cluster_base_url=args.cluster_base_url,
+            cluster_root=args.cluster_root,
+            out_dir=args.out_dir,
+            chrom_workers=args.chrom_workers,
+            download_workers=args.download_workers,
+            retries=args.retries,
+            max_sv_id_length=args.max_sv_id_length,
+            association_threshold=args.association_threshold,
+            posterior_threshold=args.posterior_threshold,
+            max_iterations=args.max_iterations,
+            tolerance=args.tolerance,
+        )
+    )
+
+    normalized_metadata_path = None
+    if args.sample_metadata is not None:
+        normalized_metadata_path = args.out_dir / "sample_metadata.tsv"
+        normalize_sample_metadata(
+            args.sample_metadata,
+            args.out_dir / "samples.tsv",
+            normalized_metadata_path,
+        )
 
     config = {
         "genome_build": "GRCh38",
@@ -94,6 +135,11 @@ def main(argv: list[str] | None = None) -> None:
         },
         "paths": {
             "vcf": str(args.vcf.resolve()),
+            "samples": str((args.out_dir / "samples.tsv").resolve()),
+            "sv_genotypes": {
+                chrom: str((args.out_dir / f"sv_genotypes.{chrom}.tsv").resolve())
+                for chrom in chroms
+            },
             "sv_to_clusters": {
                 chrom: str((args.out_dir / f"sv_to_clusters.{chrom}.tsv").resolve())
                 for chrom in chroms
@@ -102,9 +148,20 @@ def main(argv: list[str] | None = None) -> None:
                 chrom: str((args.out_dir / f"haploblocks.{chrom}.tsv").resolve())
                 for chrom in chroms
             },
+            "cluster_memberships": {
+                chrom: str((args.out_dir / f"cluster_memberships.{chrom}.tsv").resolve())
+                for chrom in chroms
+            },
+            "sv_block_summary": {
+                chrom: str((args.out_dir / f"sv_block_summary.{chrom}.tsv").resolve())
+                for chrom in chroms
+            },
             "debug_and_qc": str((args.out_dir / "debug_and_qc").resolve()),
         },
     }
+    if args.sample_metadata is not None:
+        config["data_sources"]["sample_metadata"] = str(args.sample_metadata.resolve())
+        config["paths"]["sample_metadata"] = str(normalized_metadata_path.resolve())
     config_path = args.out_dir / "config.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
     log.info("Stage 1 complete: %s", config_path.resolve())

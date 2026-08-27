@@ -20,6 +20,15 @@ from pathlib import Path
 
 import numpy as np
 
+from sv_contract import (
+    METADATA_COLUMNS,
+    canonical_sample_id,
+    normalize_chrom,
+    parse_info,
+    parse_length,
+    simplify_sv_id,
+)
+
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger("match_svs_to_clusters")
@@ -29,57 +38,10 @@ _DOWNLOAD_CLIENT_LOCK = threading.Lock()
 
 DEFAULT_BASE_URL = "https://data.haploblocks.org/haploblock_hashes/1000G"
 ALL_CHROMS = [f"chr{number}" for number in range(1, 23)] + ["chrX"]
-METADATA_COLUMNS = ["sv_id", "chrom", "start", "end", "sv_type", "length", "filter", "imprecise"]
 CLUSTER_FILENAME_RE = re.compile(r"^(chr[^_]+)_(\d+)-(\d+)_cluster\.tsv$")
 HAPLOTYPE_RE = re.compile(
     r"^(?P<sample>.+)_(?P<chrom>chr[^_]+)_region_(?P<start>\d+)-(?P<end>\d+)_hap(?P<haplotype>[01])$"
 )
-
-
-def canonical_sample_id(sample_id: str) -> str:
-    if re.fullmatch(r"GM\d+", sample_id):
-        return f"NA{sample_id[2:]}"
-    return sample_id
-
-
-def normalize_chrom(chrom: str) -> str:
-    return chrom if chrom.startswith("chr") else f"chr{chrom}"
-
-
-def parse_info(info_text: str) -> dict[str, str | bool]:
-    info: dict[str, str | bool] = {}
-    for item in info_text.split(";"):
-        if "=" in item:
-            key, value = item.split("=", 1)
-            info[key] = value
-        elif item:
-            info[item] = True
-    return info
-
-
-def parse_length(info: dict[str, str | bool], start: int, end: int) -> str:
-    value = info.get("SVLEN")
-    if isinstance(value, str) and value not in {"", "."}:
-        try:
-            return str(abs(int(value.split(",")[0])))
-        except ValueError:
-            pass
-    interval_length = end - start
-    return str(interval_length) if interval_length > 0 else ""
-
-
-def simplify_sv_id(
-    sv_id: str,
-    chrom: str,
-    start: int,
-    end: int,
-    sv_type: str,
-    max_length: int = 80,
-) -> str:
-    if len(sv_id) <= max_length:
-        return sv_id
-    digest = hashlib.sha1(sv_id.encode()).hexdigest()[:10]
-    return f"SV_{chrom}_{start}_{end}_{sv_type}_{digest}"
 
 
 def split_vcf_by_chromosome(
@@ -88,13 +50,12 @@ def split_vcf_by_chromosome(
     out_dir: Path,
     max_sv_id_length: int,
 ) -> dict[str, Path]:
-    """Stream the VCF once and write one temporary full-genotype table per chromosome."""
-    intermediate_dir = out_dir / "_intermediate"
+    """Stream the VCF once and write one downstream genotype table per chromosome."""
     qc_dir = out_dir / "debug_and_qc"
-    intermediate_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     qc_dir.mkdir(parents=True, exist_ok=True)
     selected = set(chroms)
-    paths = {chrom: intermediate_dir / f"sv_genotypes.{chrom}.tsv" for chrom in chroms}
+    paths = {chrom: out_dir / f"sv_genotypes.{chrom}.tsv" for chrom in chroms}
     handles: dict[str, object] = {}
     writers: dict[str, csv.writer] = {}
     record_counts: Counter[str] = Counter()
@@ -165,6 +126,10 @@ def split_vcf_by_chromosome(
 
     if original_samples is None or canonical_samples is None:
         raise ValueError("VCF has no #CHROM header")
+    with (out_dir / "samples.tsv").open("w", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        writer.writerow(["sample_id", "original_sample_id"])
+        writer.writerows(zip(canonical_samples, original_samples))
     for chrom in chroms:
         qc = {
             "vcf": str(vcf_path.resolve()),
@@ -189,9 +154,10 @@ def reusable_sv_tables(
     max_sv_id_length: int,
 ) -> dict[str, Path] | None:
     """Return a complete interrupted-run VCF split when its QC matches this invocation."""
-    intermediate_dir = out_dir / "_intermediate"
     qc_dir = out_dir / "debug_and_qc"
-    tables = {chrom: intermediate_dir / f"sv_genotypes.{chrom}.tsv" for chrom in chroms}
+    tables = {chrom: out_dir / f"sv_genotypes.{chrom}.tsv" for chrom in chroms}
+    if not (out_dir / "samples.tsv").exists():
+        return None
     expected_vcf = str(vcf_path.resolve())
     for chrom, table in tables.items():
         qc_path = qc_dir / f"vcf_qc.{chrom}.json"
@@ -220,7 +186,6 @@ class BlockMembership:
     end: int
     sample_clusters: dict[str, tuple[str, str]]
     total_cluster_haplotypes: Counter[str]
-    represented_cluster_haplotypes: Counter[str]
 
 
 def download_with_system_curl(url: str, timeout: int) -> bytes:
@@ -381,7 +346,6 @@ def load_block_membership(
     chrom, start, end = parse_cluster_filename(path)
     haploblock_id = f"{chrom}_{start}_{end}"
     total_counts: Counter[str] = Counter()
-    represented_counts: Counter[str] = Counter()
     by_sample: dict[str, list[str | None]] = {}
     total_rows = 0
     used_rows = 0
@@ -397,7 +361,6 @@ def load_block_membership(
             if sample not in vcf_samples:
                 continue
             used_rows += 1
-            represented_counts[cluster_id] += 1
             clusters = by_sample.setdefault(sample, [None, None])
             clusters[haplotype] = cluster_id
 
@@ -414,7 +377,6 @@ def load_block_membership(
             end=end,
             sample_clusters=complete_samples,
             total_cluster_haplotypes=total_counts,
-            represented_cluster_haplotypes=represented_counts,
         ),
         total_rows,
         used_rows,
@@ -653,7 +615,7 @@ def write_results(
     max_iterations: int,
     tolerance: float,
     download_qc: dict,
-) -> dict:
+) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     qc_dir = out_dir / "debug_and_qc"
     qc_dir.mkdir(parents=True, exist_ok=True)
@@ -678,6 +640,17 @@ def write_results(
         writer.writerow(["haploblock_id", "chrom", "start", "end"])
         for block in blocks:
             writer.writerow([block.haploblock_id, block.chrom, block.start, block.end])
+
+    cluster_membership_path = out_dir / f"cluster_memberships.{chrom}.tsv"
+    with cluster_membership_path.open("w", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        writer.writerow(["haploblock_id", "chrom", "start", "end", "sample_id", "haplotype", "cluster_id"])
+        for block in blocks:
+            for sample_id, cluster_ids in sorted(block.sample_clusters.items()):
+                for haplotype, cluster_id in enumerate(cluster_ids):
+                    writer.writerow(
+                        [block.haploblock_id, block.chrom, block.start, block.end, sample_id, haplotype, cluster_id]
+                    )
 
     starts = np.asarray([record.start for record in records])
     ends = np.asarray([record.end for record in records])
@@ -725,7 +698,7 @@ def write_results(
 
     with (
         (out_dir / f"sv_to_clusters.{chrom}.tsv").open("w", newline="") as downstream_handle,
-        (qc_dir / f"sv_block_qc.{chrom}.tsv").open("w", newline="") as summary_handle,
+        (out_dir / f"sv_block_summary.{chrom}.tsv").open("w", newline="") as summary_handle,
     ):
         downstream_writer = csv.DictWriter(downstream_handle, fieldnames=downstream_fields, delimiter="\t", lineterminator="\n")
         summary_writer = csv.DictWriter(summary_handle, fieldnames=summary_fields, delimiter="\t", lineterminator="\n")
@@ -792,6 +765,8 @@ def write_results(
         "chrom": chrom,
         "downstream_output": str((out_dir / f"sv_to_clusters.{chrom}.tsv").resolve()),
         "haploblock_output": str(haploblock_path.resolve()),
+        "cluster_membership_output": str(cluster_membership_path.resolve()),
+        "sv_block_summary_output": str((out_dir / f"sv_block_summary.{chrom}.tsv").resolve()),
         "sv_table": str(sv_table.resolve()),
         "sv_records": len(records),
         "vcf_samples": len(samples),
@@ -816,25 +791,17 @@ def write_results(
         "posterior_assignment_threshold": posterior_threshold,
         "max_iterations": max_iterations,
         "tolerance": tolerance,
-        "intermediates_removed_after_success": True,
+        "downloaded_intermediates_removed_after_success": True,
     }
     (qc_dir / f"method_qc.{chrom}.json").write_text(json.dumps(qc, indent=2) + "\n")
     log.info("Evaluated %d SV-block pairs across %d cluster files", sv_block_pairs, len(blocks))
-    return qc
 
 
-def remove_intermediates(
-    sv_table: Path,
+def remove_downloaded_intermediates(
     cluster_paths: list[Path],
     cluster_cache_dir: Path,
     download_qc: dict,
 ) -> None:
-    sv_table.unlink(missing_ok=True)
-    if sv_table.parent.name == "_intermediate":
-        try:
-            sv_table.parent.rmdir()
-        except OSError:
-            pass
     if download_qc["source"] != "download":
         return
     for path in cluster_paths:
@@ -858,7 +825,7 @@ def process_chromosome(
     posterior_threshold: float,
     max_iterations: int,
     tolerance: float,
-) -> dict:
+) -> None:
     cluster_dir = None
     if cluster_root is not None:
         per_chrom_dir = cluster_root / chrom
@@ -872,7 +839,7 @@ def process_chromosome(
         download_workers,
         retries,
     )
-    qc = write_results(
+    write_results(
         chrom,
         sv_table,
         cluster_paths,
@@ -883,14 +850,13 @@ def process_chromosome(
         tolerance,
         download_qc,
     )
-    remove_intermediates(sv_table, cluster_paths, cluster_cache_dir, download_qc)
-    return qc
+    remove_downloaded_intermediates(cluster_paths, cluster_cache_dir, download_qc)
+
 
 
 def remove_legacy_outputs(out_dir: Path) -> None:
     for path in (
         out_dir / "sample_id_map.tsv",
-        out_dir / "cluster_memberships.chr6.tsv",
         out_dir / "cluster_evidence.tsv",
         out_dir / "sv_cluster_associations.tsv",
         out_dir / "heterozygote_assignments.tsv",
@@ -916,8 +882,12 @@ def chromosome_is_complete(
 ) -> bool:
     qc_dir = out_dir / "debug_and_qc"
     required = [
+        out_dir / "samples.tsv",
+        out_dir / f"sv_genotypes.{chrom}.tsv",
         out_dir / f"sv_to_clusters.{chrom}.tsv",
         out_dir / f"haploblocks.{chrom}.tsv",
+        out_dir / f"cluster_memberships.{chrom}.tsv",
+        out_dir / f"sv_block_summary.{chrom}.tsv",
         qc_dir / f"method_qc.{chrom}.json",
         qc_dir / f"vcf_qc.{chrom}.json",
     ]
@@ -953,8 +923,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> None:
-    args = parse_args(argv)
+def run(args: argparse.Namespace) -> None:
     chroms = (
         ALL_CHROMS
         if args.chroms.strip().lower() == "all"
@@ -1027,8 +996,11 @@ def main(argv: list[str] | None = None) -> None:
         },
         "outputs": {
             chrom: {
+                "sv_genotypes": str((args.out_dir / f"sv_genotypes.{chrom}.tsv").resolve()),
                 "sv_to_clusters": str((args.out_dir / f"sv_to_clusters.{chrom}.tsv").resolve()),
                 "haploblocks": str((args.out_dir / f"haploblocks.{chrom}.tsv").resolve()),
+                "cluster_memberships": str((args.out_dir / f"cluster_memberships.{chrom}.tsv").resolve()),
+                "sv_block_summary": str((args.out_dir / f"sv_block_summary.{chrom}.tsv").resolve()),
             }
             for chrom in completed_chroms
         },
@@ -1036,6 +1008,10 @@ def main(argv: list[str] | None = None) -> None:
     (qc_dir / "run_qc.json").write_text(json.dumps(run_qc, indent=2) + "\n")
     if completed_chroms == ALL_CHROMS:
         remove_legacy_outputs(args.out_dir)
+
+
+def main(argv: list[str] | None = None) -> None:
+    run(parse_args(argv))
 
 
 if __name__ == "__main__":

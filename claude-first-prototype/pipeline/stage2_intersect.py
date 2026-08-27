@@ -1,9 +1,11 @@
 """Optional Stage 2: classify cohort SVs relative to haploblock boundaries.
 
 Stage 1 already links SVs to associated haplotype clusters. This script is
-only needed for the separate positional question: whether SVs lie inside,
-near, or across haploblock boundaries. It reads the same VCF and the compact
-per-chromosome haploblock tables registered in Stage 1's config.yaml.
+only needed for the separate positional question. ``position_class`` records
+exact overlap: zero blocks is outside, one is within, and two or more is
+boundary_crossing. ``near_boundary`` separately records proximity to an edge.
+The script reads the same VCF and the compact per-chromosome haploblock tables
+registered in Stage 1's config.yaml.
 """
 
 from __future__ import annotations
@@ -20,22 +22,36 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from match_svs_to_clusters import normalize_chrom, parse_info, parse_length, simplify_sv_id
+from sv_contract import METADATA_COLUMNS, normalize_chrom, parse_info, parse_length, simplify_sv_id
 
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger("stage2_intersect")
 
 
+def is_near_boundary(boundaries: np.ndarray, start: int, end: int, boundary_bp: int) -> bool:
+    for position in (start, end):
+        index = np.searchsorted(boundaries, position)
+        if index < len(boundaries) and boundaries[index] - position < boundary_bp:
+            return True
+        if index and position - boundaries[index - 1] < boundary_bp:
+            return True
+    return False
+
+
 def classify_sv_positions(sv: pd.DataFrame, hb: pd.DataFrame, boundary_bp: int) -> pd.DataFrame:
     position_class = np.full(len(sv), "outside_block", dtype=object)
     haploblock_ids = np.full(len(sv), "", dtype=object)
+    near_boundary = np.full(len(sv), False, dtype=bool)
 
     for chrom, hb_group in hb.groupby("chrom", sort=False):
         hb_group = hb_group.sort_values("start")
         starts = hb_group["start"].to_numpy()
         ends = hb_group["end"].to_numpy()
         ids = hb_group["haploblock_id"].to_numpy()
+        if len(starts) > 1 and np.any(ends[:-1] > starts[1:]):
+            raise ValueError(f"Overlapping haploblocks on {chrom} are not supported")
+        boundaries = np.sort(np.concatenate([starts, ends]))
         sv_mask = (sv["chrom"] == chrom).to_numpy()
         if not sv_mask.any():
             continue
@@ -44,43 +60,25 @@ def classify_sv_positions(sv: pd.DataFrame, hb: pd.DataFrame, boundary_bp: int) 
         sv_ends = sv.loc[sv_mask, "end"].to_numpy()
         chrom_classes = np.full(sv_mask.sum(), "outside_block", dtype=object)
         chrom_ids = np.full(sv_mask.sum(), "", dtype=object)
+        chrom_near_boundary = np.full(sv_mask.sum(), False, dtype=bool)
 
         for row_index, (sv_start, sv_end) in enumerate(zip(sv_starts, sv_ends)):
-            first = np.searchsorted(ends, sv_start - boundary_bp, side="left")
-            last = np.searchsorted(starts, sv_end + boundary_bp, side="right")
-            relevant = []
-            safely_inside = None
-            for block_index in range(first, last):
-                block_start = starts[block_index]
-                block_end = ends[block_index]
-                overlaps = sv_start < block_end and sv_end > block_start
-                if overlaps:
-                    relevant.append(ids[block_index])
-                    if (
-                        block_start <= sv_start
-                        and sv_end <= block_end
-                        and sv_start - block_start >= boundary_bp
-                        and block_end - sv_end >= boundary_bp
-                    ):
-                        safely_inside = ids[block_index]
-                else:
-                    gap = block_start - sv_end if block_start >= sv_end else sv_start - block_end
-                    if 0 <= gap < boundary_bp:
-                        relevant.append(ids[block_index])
-
-            if not relevant:
-                continue
-            chrom_classes[row_index] = (
-                "within_block" if len(relevant) == 1 and safely_inside is not None else "boundary_crossing"
-            )
-            chrom_ids[row_index] = ",".join(relevant)
+            first = np.searchsorted(ends, sv_start, side="right")
+            last = np.searchsorted(starts, sv_end, side="left")
+            if first < last:
+                chrom_classes[row_index] = "within_block" if last - first == 1 else "boundary_crossing"
+                chrom_ids[row_index] = ",".join(ids[first:last])
+                chrom_near_boundary[row_index] = last - first > 1
+            chrom_near_boundary[row_index] |= is_near_boundary(boundaries, sv_start, sv_end, boundary_bp)
 
         position_class[sv_mask] = chrom_classes
         haploblock_ids[sv_mask] = chrom_ids
+        near_boundary[sv_mask] = chrom_near_boundary
 
     result = sv.copy()
     result["position_class"] = position_class
     result["haploblock_id"] = haploblock_ids
+    result["near_boundary"] = near_boundary
     return result
 
 
@@ -116,7 +114,7 @@ def load_sv_metadata(vcf_path: Path, chroms: list[str], max_id_length: int) -> d
                 }
             )
             record_counts[chrom] += 1
-    return {chrom: pd.DataFrame(chrom_rows) for chrom, chrom_rows in rows.items()}
+    return {chrom: pd.DataFrame(chrom_rows, columns=METADATA_COLUMNS) for chrom, chrom_rows in rows.items()}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -155,6 +153,7 @@ def main(argv: list[str] | None = None) -> None:
         qc["chromosomes"][chrom] = {
             "sv_records": len(annotated),
             "position_class_counts": counts,
+            "near_boundary_records": int(annotated["near_boundary"].sum()),
             "output": str(output_path.resolve()),
         }
         log.info("%s: %s", chrom, counts)

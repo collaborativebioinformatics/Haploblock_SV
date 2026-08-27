@@ -5,3 +5,6 @@ pyyaml
 
 # Optional Stage 2 boundary analysis
 pandas
+
+# Stage 5 SV-type enrichment
+scipy

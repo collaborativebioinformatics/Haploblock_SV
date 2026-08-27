@@ -75,8 +75,8 @@ The pipeline is currently under active development
 - [x] Stage 1 — Data preparation
 - [x] Stage 2 — SV annotation
 - [ ] Stage 3 — Boundary enrichment
-- [ ] Stage 4 — Haploblock classification
-- [ ] Stage 5 — SV type enrichment
+- [x] Stage 4 — Common vs population-specific SV classification
+- [x] Stage 5 — SV type enrichment
 - [ ] Stage 6 — Population cluster comparison
 
 

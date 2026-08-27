@@ -1,1 +1,9 @@
 claude-first-prototype/local_test_output/
+.DS_Store
+._*
+.idea/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+claude-first-prototype/stage*_output/
+input/
