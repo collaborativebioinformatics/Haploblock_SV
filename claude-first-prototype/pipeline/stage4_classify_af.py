@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from match_svs_to_clusters import METADATA_COLUMNS
+from sv_contract import METADATA_COLUMNS
 
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -33,26 +33,21 @@ def resolve_path(path: str, config_dir: Path) -> Path:
     return path if path.is_absolute() else config_dir / path
 
 
-def parse_genotypes(sv: pd.DataFrame, samples: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Return alternate and called allele counts for every SV and sample."""
-    alt = pd.DataFrame(0, index=sv.index, columns=samples, dtype=int)
-    called = pd.DataFrame(0, index=sv.index, columns=samples, dtype=int)
+def genotype_counts(genotype: pd.Series) -> tuple[np.ndarray, np.ndarray]:
+    """Return alternate and called allele counts for one sample across all SVs."""
+    if pd.api.types.is_numeric_dtype(genotype):
+        dosage = pd.to_numeric(genotype, errors="coerce")
+        has_call = dosage.notna()
+        return dosage.where(has_call, 0).astype(int).to_numpy(), (has_call.astype(int) * 2).to_numpy()
 
-    for sample in samples:
-        column = sv[sample]
-        if pd.api.types.is_numeric_dtype(column):
-            dosage = pd.to_numeric(column, errors="coerce")
-            has_call = dosage.notna()
-            alt[sample] = dosage.where(has_call, 0).astype(int)
-            called[sample] = has_call.astype(int) * 2
-            continue
-
-        genotype = column.astype("string").str.strip()
-        missing = genotype.str.contains(".", regex=False, na=True)
-        alt[sample] = genotype.str.count(r"[1-9]").mask(missing, 0).fillna(0).astype(int)
-        called[sample] = genotype.str.count(r"[0-9]").mask(missing, 0).fillna(0).astype(int)
-
-    return alt, called
+    genotype = genotype.astype("string").str.strip()
+    missing = genotype.str.contains(".", regex=False, na=True)
+    alternate = genotype.str.count(r"(?:^|[|/])[1-9][0-9]*(?=$|[|/])")
+    called = genotype.str.count(r"(?:^|[|/])[0-9]+(?=$|[|/])")
+    return (
+        alternate.mask(missing, 0).fillna(0).astype(int).to_numpy(),
+        called.mask(missing, 0).fillna(0).astype(int).to_numpy(),
+    )
 
 
 def classify(
@@ -61,8 +56,8 @@ def classify(
     af_threshold: float,
     absent_af_threshold: float,
     min_samples_per_population: int,
-) -> pd.DataFrame:
-    """Return one row per SV and population with AF and SV classification."""
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return separate per-population AF and per-SV classification tables."""
     sv = sv.reset_index(drop=True)
     population_by_sample = dict(
         zip(metadata["sample_id"].astype(str), metadata["population"].astype(str))
@@ -72,19 +67,21 @@ def classify(
         population: [sample for sample in samples if population_by_sample[sample] == population]
         for population in sorted({population_by_sample[sample] for sample in samples})
     }
-    alt, called = parse_genotypes(sv, samples)
-
     population_af = {}
     population_called_samples = {}
     population_called_alleles = {}
     for population, population_samples in samples_by_population.items():
-        alt_sum = alt[population_samples].sum(axis=1).to_numpy()
-        allele_sum = called[population_samples].sum(axis=1).to_numpy()
+        alt_sum = np.zeros(len(sv), dtype=int)
+        allele_sum = np.zeros(len(sv), dtype=int)
+        called_samples = np.zeros(len(sv), dtype=int)
+        for sample in population_samples:
+            alternate, called = genotype_counts(sv[sample])
+            alt_sum += alternate
+            allele_sum += called
+            called_samples += called > 0
         with np.errstate(invalid="ignore", divide="ignore"):
             population_af[population] = np.where(allele_sum > 0, alt_sum / allele_sum, np.nan)
-        population_called_samples[population] = (
-            called[population_samples] > 0
-        ).sum(axis=1).to_numpy()
+        population_called_samples[population] = called_samples
         population_called_alleles[population] = allele_sum
 
     classes = []
@@ -130,11 +127,20 @@ def classify(
         specific_populations.append(specific_population)
         other_reasons.append(reason)
 
-    rows = []
+    classification_rows = []
+    population_rows = []
     for row_index, variant in sv.iterrows():
+        classification_rows.append(
+            {
+                **{column: variant[column] for column in METADATA_COLUMNS},
+                "sv_class": classes[row_index],
+                "specific_to_population": specific_populations[row_index],
+                "other_reason": other_reasons[row_index],
+            }
+        )
         for population, population_samples in samples_by_population.items():
             af = population_af[population][row_index]
-            rows.append(
+            population_rows.append(
                 {
                     **{column: variant[column] for column in METADATA_COLUMNS},
                     "population": population,
@@ -146,12 +152,9 @@ def classify(
                         >= min_samples_per_population
                     ),
                     "af": float(af) if np.isfinite(af) else np.nan,
-                    "sv_class": classes[row_index],
-                    "specific_to_population": specific_populations[row_index],
-                    "other_reason": other_reasons[row_index],
                 }
             )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(population_rows), pd.DataFrame(classification_rows)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -174,19 +177,15 @@ def main(argv: list[str] | None = None) -> None:
     classification_tables = []
     for chrom, path in config["paths"]["sv_genotypes"].items():
         sv = pd.read_csv(resolve_path(path, config_dir), sep="\t")
-        result = classify(
+        by_population, classifications = classify(
             sv,
             metadata,
             args.af_threshold,
             args.absent_af_threshold,
             args.min_samples_per_population,
         )
-        population_tables.append(result)
-        classification_tables.append(
-            result.drop_duplicates("sv_id")[
-                METADATA_COLUMNS + ["sv_class", "specific_to_population", "other_reason"]
-            ]
-        )
+        population_tables.append(by_population)
+        classification_tables.append(classifications)
         log.info("%s: classified %d SVs", chrom, len(sv))
 
     by_population = pd.concat(population_tables, ignore_index=True)

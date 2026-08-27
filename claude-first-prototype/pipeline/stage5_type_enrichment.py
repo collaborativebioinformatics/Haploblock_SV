@@ -25,6 +25,11 @@ from scipy import stats
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger("stage5_type_enrichment")
 
+ENRICHMENT_COLUMNS = [
+    "haploblock_id", "sv_type", "observed_count", "expected_count",
+    "p_value", "q_value", "flagged",
+]
+
 
 def resolve_path(path: str, config_dir: Path) -> Path:
     path = Path(path)
@@ -52,6 +57,8 @@ def enrichment_table(
     blocks["length"] = blocks["end"] - blocks["start"]
 
     sv_types = sorted(assigned["sv_type"].unique())
+    if not sv_types:
+        return pd.DataFrame(columns=ENRICHMENT_COLUMNS)
     observed = (
         assigned.groupby(["haploblock_id", "sv_type"]).size()
         .unstack("sv_type", fill_value=0)
@@ -86,7 +93,7 @@ def enrichment_table(
                 }
             )
 
-    return pd.DataFrame(rows).sort_values(
+    return pd.DataFrame(rows, columns=ENRICHMENT_COLUMNS).sort_values(
         ["q_value", "haploblock_id", "sv_type"]
     ).reset_index(drop=True)
 

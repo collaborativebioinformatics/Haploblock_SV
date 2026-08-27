@@ -92,3 +92,10 @@ def test_stage4_reads_stage1_contract_and_classifies_each_sv_once(tmp_path: Path
     assert output_config["paths"]["sv_classification"] == str(
         (out_dir / "sv_classification.tsv").resolve()
     )
+
+
+def test_genotype_counts_treat_multidigit_alleles_as_one_allele() -> None:
+    alternate, called = stage4_classify_af.genotype_counts(pd.Series(["12/0", "10/10", "./."]))
+
+    assert alternate.tolist() == [1, 2, 0]
+    assert called.tolist() == [2, 2, 0]

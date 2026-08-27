@@ -85,3 +85,14 @@ def test_stage5_uses_unique_sv_block_pairs_and_flags_spike(tmp_path: Path) -> No
     assert output_config["paths"]["sv_type_enrichment"] == str(
         (out_dir / "sv_type_enrichment.tsv").resolve()
     )
+
+
+def test_stage5_handles_an_empty_assignment_table() -> None:
+    result = stage5_type_enrichment.enrichment_table(
+        pd.DataFrame(columns=["sv_id", "haploblock_id", "sv_type"]),
+        pd.DataFrame([{"haploblock_id": "block1", "chrom": "chr1", "start": 0, "end": 100}]),
+        q_threshold=0.05,
+    )
+
+    assert list(result.columns) == stage5_type_enrichment.ENRICHMENT_COLUMNS
+    assert result.empty

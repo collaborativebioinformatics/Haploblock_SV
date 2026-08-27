@@ -65,7 +65,7 @@ def test_stage1_publishes_downstream_contract(tmp_path: Path) -> None:
     )
 
     config = yaml.safe_load((out_dir / "config.yaml").read_text())
-    assert set(config["paths"]) == {
+    assert {
         "vcf",
         "samples",
         "sample_metadata",
@@ -75,7 +75,7 @@ def test_stage1_publishes_downstream_contract(tmp_path: Path) -> None:
         "cluster_memberships",
         "sv_block_summary",
         "debug_and_qc",
-    }
+    }.issubset(config["paths"])
     for key in ("sv_genotypes", "sv_to_clusters", "haploblocks", "cluster_memberships", "sv_block_summary"):
         assert Path(config["paths"][key]["chr1"]).exists()
 

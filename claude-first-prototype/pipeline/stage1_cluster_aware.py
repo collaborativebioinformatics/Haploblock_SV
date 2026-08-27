@@ -15,12 +15,8 @@ from pathlib import Path
 
 import yaml
 
-from match_svs_to_clusters import (
-    ALL_CHROMS,
-    canonical_sample_id,
-    main as run_cluster_aware,
-    normalize_chrom,
-)
+from match_svs_to_clusters import ALL_CHROMS, run as run_cluster_aware
+from sv_contract import canonical_sample_id, normalize_chrom
 
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -91,25 +87,24 @@ def main(argv: list[str] | None = None) -> None:
     chroms = parse_chroms(args.chroms)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    cluster_args = [
-        "--vcf", str(args.vcf),
-        "--out-dir", str(args.out_dir),
-        "--chroms", ",".join(chroms),
-        "--cluster-base-url", args.cluster_base_url,
-        "--chrom-workers", str(args.chrom_workers),
-        "--download-workers", str(args.download_workers),
-        "--retries", str(args.retries),
-        "--max-sv-id-length", str(args.max_sv_id_length),
-        "--association-threshold", str(args.association_threshold),
-        "--posterior-threshold", str(args.posterior_threshold),
-        "--max-iterations", str(args.max_iterations),
-        "--tolerance", str(args.tolerance),
-    ]
-    if args.cluster_root is not None:
-        cluster_args.extend(["--cluster-root", str(args.cluster_root)])
-
     log.info("Running cluster-aware preprocessing for %d chromosome(s)", len(chroms))
-    run_cluster_aware(cluster_args)
+    run_cluster_aware(
+        argparse.Namespace(
+            vcf=args.vcf,
+            chroms=",".join(chroms),
+            cluster_base_url=args.cluster_base_url,
+            cluster_root=args.cluster_root,
+            out_dir=args.out_dir,
+            chrom_workers=args.chrom_workers,
+            download_workers=args.download_workers,
+            retries=args.retries,
+            max_sv_id_length=args.max_sv_id_length,
+            association_threshold=args.association_threshold,
+            posterior_threshold=args.posterior_threshold,
+            max_iterations=args.max_iterations,
+            tolerance=args.tolerance,
+        )
+    )
 
     normalized_metadata_path = None
     if args.sample_metadata is not None:

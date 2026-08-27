@@ -1,8 +1,6 @@
 # Changelog
 
-## Unreleased
-
-### Overview
+### Architecture changes
 
 - Reconciled the early pipeline around stable Stage 1 contracts for SV genotypes, sample metadata, haploblocks, cluster memberships, unique SV–block summaries, and passing SV–cluster associations.
 - Clarified Stage 2 as an optional descriptive boundary analysis, separate from cluster association.
@@ -10,7 +8,7 @@
 - Ported Stage 5 to test per-haploblock SV-type enrichment from unique SV–block pairs using block-length-adjusted Poisson expectations and Benjamini–Hochberg correction.
 - Added focused contract tests and carried-forward configuration files so later stages can consume the reconciled outputs consistently.
 
-### Details
+### Bug fixes
 
 - Restored indexed Stage 2 interval lookup, validated non-overlapping haploblocks, and report proximity for SVs just outside a block.
 - Kept Stage 2 outputs schema-stable when a requested chromosome has no SV records.
