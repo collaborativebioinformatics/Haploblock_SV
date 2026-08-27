@@ -114,3 +114,46 @@ def test_dosage_int_genotypes_match_gt_strings():
     assert afg["P2"] == pytest.approx(0.0)
     assert out_d["sv_category"].iloc[0] == out_g["sv_category"].iloc[0] == "specific_to_population"
     assert out_d["specific_to_population"].iloc[0] == "P1"
+
+
+def test_three_sv_two_population_matrix_at_default_threshold():
+    """3 SVs x 2 populations (4 samples each): one common, one private to
+    population A, one absent everywhere. Check both the category and every
+    per-population AF at the default threshold (t=0.05, z=0.01)."""
+    meta = pd.DataFrame({
+        "sample_id": ["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4"],
+        "population": ["popA"] * 4 + ["popB"] * 4,
+    })
+
+    def sv_row(sv_id, gts):
+        return {"sv_id": sv_id, "sv_type": "DEL", "chrom": "chr1", "start": 1, "end": 2,
+                "haploblock_id": "hb1", "position_class": "within_block",
+                **dict(zip(meta["sample_id"], gts))}
+
+    sv = pd.DataFrame([
+        # common: alt in both populations, both AFs >= 0.05
+        sv_row("sv_common",    ["0/1", "0/1", "0/0", "0/0",  "0/1", "0/0", "0/0", "0/0"]),
+        # private to popA: 0.375 in popA, exactly 0 in popB
+        sv_row("sv_private_A", ["1/1", "0/1", "0/0", "0/0",  "0/0", "0/0", "0/0", "0/0"]),
+        # absent everywhere
+        sv_row("sv_rare",      ["0/0", "0/0", "0/0", "0/0",  "0/0", "0/0", "0/0", "0/0"]),
+    ])
+    gt_cols = list(meta["sample_id"])
+
+    out = stage4.classify(sv, meta, gt_cols, af_threshold=0.05, absent_af_threshold=0.01, min_samples_per_pop=2)
+    assert len(out) == 3 * 2
+
+    cat = out.drop_duplicates("sv_id").set_index("sv_id")
+    assert cat.loc["sv_common", "sv_category"] == "common"
+    assert cat.loc["sv_private_A", "sv_category"] == "specific_to_population"
+    assert cat.loc["sv_private_A", "specific_to_population"] == "popA"
+    assert cat.loc["sv_rare", "sv_category"] == "other"
+    assert cat.loc["sv_rare", "other_reason"] == "absent_or_rare"
+
+    af = out.set_index(["sv_id", "population"])["af"]
+    assert af[("sv_common", "popA")] == pytest.approx(2 / 8)      # 2 alt / 8 alleles
+    assert af[("sv_common", "popB")] == pytest.approx(1 / 8)
+    assert af[("sv_private_A", "popA")] == pytest.approx(3 / 8)   # 1/1 + 0/1
+    assert af[("sv_private_A", "popB")] == pytest.approx(0.0)
+    assert af[("sv_rare", "popA")] == pytest.approx(0.0)
+    assert af[("sv_rare", "popB")] == pytest.approx(0.0)
