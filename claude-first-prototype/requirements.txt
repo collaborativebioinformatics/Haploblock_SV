@@ -1,3 +1,7 @@
+# Stage 0 VCF files merging
+bcftools
+truvari
+
 # Stage 1 cluster-aware preprocessing
 numpy
 requests
