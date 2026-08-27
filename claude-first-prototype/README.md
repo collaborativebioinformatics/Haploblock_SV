@@ -14,7 +14,7 @@ Haploblocks — genomic regions of conserved haplotype structure identified by t
 | 1 | Cluster-aware preprocessing | Infer SV-to-haploblock-cluster associations from a merged cohort VCF and write probability/support/QC outputs | Implemented |
 | 2 | Boundary classification | Descriptively classify each SV as safely within or near/crossing a block boundary | Optional/implemented |
 | 3 | Boundary enrichment test | Earlier proposal for permutation/spacing tests; not part of the current pipeline | Future decision |
-| 4 | Common vs. population-specific SV classification | Calculate AF using populations supplied by `sample_metadata.tsv`, independently of haploblocks.org clusters | Proposed |
+| 4 | Common vs. population-specific SV classification | Calculate AF using populations supplied by `sample_metadata.tsv`, independently of haploblocks.org clusters | Implemented |
 | 5 | Per-haploblock SV-type enrichment | Poisson/negative-binomial regression, block length + SNP density as offset, per-block-per-type deviation, BH-FDR corrected, minimum-count threshold | H2, H4 |
 | 6 | Population-cluster correlation | Compare population-specific SV patterns with predefined SNV-based haplotype clusters | Proposed |
 | 7 | SV-based population structure reconstruction | Per-sample/per-haploblock SV matrix → PCA/UMAP and cluster-agreement summaries | Proposed visualization |
@@ -144,6 +144,17 @@ python claude-first-prototype/pipeline/stage2_intersect.py \
 ```
 
 This analysis is not required to establish cluster association. Because published blocks are contiguous regions, boundary results should be treated as a distinct spatial analysis rather than evidence that an SV belongs to a cluster.
+
+## Current Stage 4: population allele-frequency classification
+
+`pipeline/stage4_classify_af.py` reads Stage 1's chromosome-specific `sv_genotypes` tables and normalized `sample_metadata.tsv`. It computes allele frequency for every population present in the metadata and classifies each SV once as `common`, `population_specific`, or `other`. It deliberately does not read haploblock cluster labels.
+
+```bash
+python claude-first-prototype/pipeline/stage4_classify_af.py \
+  --config claude-first-prototype/stage1_output/config.yaml
+```
+
+The stage writes `sv_af_classification.tsv` with one row per SV and population, `sv_classification.tsv` with one row per SV, and a `config.yaml` that carries the Stage 1 paths forward. Stage 6 can join the one-row-per-SV classification to `sv_block_summary` and independently compare it with `cluster_memberships`.
 
 ## Current testing status
 

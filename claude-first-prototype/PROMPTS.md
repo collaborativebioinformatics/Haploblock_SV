@@ -60,8 +60,8 @@ The remaining prompts are preserved from the original hackathon plan. They are c
 
 ### Stage 4: Common vs. population-specific SV classification
 
-**Implement:**
-> Write `pipeline/stage4_classify_af.py` using every SV in Stage 1's `sv_genotypes` tables and the population labels in its normalized `sample_metadata.tsv`. Classify each SV once before joining any block or cluster associations. Do not hardcode the five 1000 Genomes superpopulations: calculate allele frequency for whatever populations are represented in the metadata. Classify each SV as `common` (AF above a configurable threshold, default 0.05, in at least two populations), `population_specific` (AF above threshold in exactly one population and near-zero elsewhere), or `other` (doesn't meet either definition; report the fraction). Keep these population labels independent of the data.haploblocks.org clusters to avoid circularity with Stage 6. Add `sv_class` and `specific_to_population` (nullable) columns and write the result.
+**Implemented:**
+> `pipeline/stage4_classify_af.py` uses every SV in Stage 1's `sv_genotypes` tables and the population labels in its normalized `sample_metadata.tsv`. It classifies each SV once before any block or cluster join and writes both a per-population AF table and a one-row-per-SV classification table. The output classes are `common`, `population_specific`, and `other`, with `specific_to_population` and `other_reason` providing the relevant detail. The script never reads haploblock cluster labels, preserving the independence needed for Stage 6.
 
 **Test:**
 > Write a pytest test with a synthetic 3-SV, 2-population genotype matrix: one SV common to both populations, one private to population A only, one rare/absent everywhere. Assert the classification (`common`, `population_specific` with correct population, `other`) matches for all three at the default threshold.
