@@ -67,7 +67,8 @@ def normalize_sample_metadata(source: Path, samples_path: Path, destination: Pat
         writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t", lineterminator="\n")
         writer.writeheader()
         for sample in sample_rows:
-            writer.writerow(metadata_by_sample[sample["sample_id"]])
+            if sample["sample_id"] in metadata_by_sample:
+                writer.writerow(metadata_by_sample[sample["sample_id"]])
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
