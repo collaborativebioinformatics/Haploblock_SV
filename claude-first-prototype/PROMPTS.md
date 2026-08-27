@@ -71,14 +71,14 @@ The remaining prompts are preserved from the original hackathon plan. They are c
 
 ### Stage 5: Per-haploblock SV-type enrichment (with block-architecture offset)
 
-**Implement:**
-> Write `pipeline/stage5_type_enrichment.py` using Stage 1's `sv_block_summary` and `haploblocks` tables. Count each unique (`sv_id`, `haploblock_id`) pair once; do not count rows directly from `sv_to_clusters`, where one SV-block pair can have multiple passing clusters. Build a per-haploblock × SV-type count matrix. For each SV type, calculate the overall rate as the total number of SVs divided by total haploblock length, then calculate each block's expected count from its length. Use a Poisson test to compare observed and expected counts and apply Benjamini-Hochberg FDR correction across block × type tests. Output haploblock ID, SV type, observed count, expected count, p-value, FDR-adjusted q-value, and a q < 0.05 flag. This is a proposed analysis whose assumptions and power should be checked before implementation.
+**Implemented:**
+> `pipeline/stage5_type_enrichment.py` uses Stage 1's `sv_block_summary` and `haploblocks` tables. It counts each unique (`sv_id`, `haploblock_id`) pair once, builds the complete haploblock × SV-type matrix, calculates length-adjusted expected counts, and applies two-sided Poisson tests with Benjamini-Hochberg correction across all cells. It writes observed and expected counts, p- and q-values, and the configurable significance flag to `sv_type_enrichment.tsv`, then registers that path in a carried-forward config. The length-only Poisson model is the current prototype; callability, SNP density, and overdispersion remain candidates for model refinement.
 
 **Test:**
 > Write a pytest test with synthetic data: several haploblocks of varying length with SV counts proportional to length (should show no significant enrichment after offset correction), plus one haploblock with an artificially inflated count for one SV type (should be flagged as significant after FDR correction). Assert the artificially-inflated block is flagged and the proportional ones are not.
 
 **Wire to next stage:**
-> Confirm Stage 9 (integration) reads this stage's flagged-haploblock table to build the "haploblocks prone to a particular SV type" section of the final report, and confirm the minimum-count exclusion fraction is surfaced there too as a documented limitation, not silently dropped.
+> Stage 9 (integration) should read `paths.sv_type_enrichment` from the carried-forward config and use its flagged cells for the "haploblocks prone to a particular SV type" section. Report that this prototype adjusts for block length only; do not imply that SNP density, callability, or overdispersion have already been modeled.
 
 ---
 

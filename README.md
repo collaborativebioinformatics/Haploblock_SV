@@ -76,7 +76,7 @@ The pipeline is currently under active development
 - [x] Stage 2 — SV annotation
 - [ ] Stage 3 — Boundary enrichment
 - [x] Stage 4 — Common vs population-specific SV classification
-- [ ] Stage 5 — SV type enrichment
+- [x] Stage 5 — SV type enrichment
 - [ ] Stage 6 — Population cluster comparison
 
 

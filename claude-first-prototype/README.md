@@ -4,7 +4,7 @@ Prototype pipeline plan for the Structural Variants Hackathon at Baylor College 
 
 ## Introduction
 
-Haploblocks — genomic regions of conserved haplotype structure identified by the [haploblocks.org](https://haploblocks.org) / [data.haploblocks.org](https://data.haploblocks.org) projects via genomic hashing — capture a layer of population structure that is complementary to single-SNP analyses, but how structural variants (SVs) are organized relative to these blocks is unexplored. Our core research question is whether SV type, location, and population specificity are non-randomly distributed across haploblocks, and whether SV-bearing haplotypes correspond to the clusters already derived from small-variant haplotype hashes. The current primary input is a pre-merged 1000 Genomes ONT VCF; proposed enrichment, spatial-statistics, PCA/UMAP, cluster-agreement, and functional-overlay analyses below are retained as possible follow-up work rather than current commitments. What's novel is treating haploblock **clusters**, rather than only immutable block regions, as the unit of SV interpretation.
+Haploblocks — genomic regions of conserved haplotype structure identified by the [haploblocks.org](https://haploblocks.org) / [data.haploblocks.org](https://data.haploblocks.org) projects via genomic hashing — capture a layer of population structure that is complementary to single-SNP analyses, but how structural variants (SVs) are organized relative to these blocks is unexplored. Our core research question is whether SV type, location, and population specificity are non-randomly distributed across haploblocks, and whether SV-bearing haplotypes correspond to the clusters already derived from small-variant haplotype hashes. The current primary input is a pre-merged 1000 Genomes ONT VCF; spatial-statistics, PCA/UMAP, cluster-agreement, and functional-overlay analyses below are retained as possible follow-up work rather than current commitments. What's novel is treating haploblock **clusters**, rather than only immutable block regions, as the unit of SV interpretation.
 
 ## Pipeline overview
 
@@ -15,7 +15,7 @@ Haploblocks — genomic regions of conserved haplotype structure identified by t
 | 2 | Boundary classification | Descriptively classify each SV as safely within or near/crossing a block boundary | Optional/implemented |
 | 3 | Boundary enrichment test | Earlier proposal for permutation/spacing tests; not part of the current pipeline | Future decision |
 | 4 | Common vs. population-specific SV classification | Calculate AF using populations supplied by `sample_metadata.tsv`, independently of haploblocks.org clusters | Implemented |
-| 5 | Per-haploblock SV-type enrichment | Poisson/negative-binomial regression, block length + SNP density as offset, per-block-per-type deviation, BH-FDR corrected, minimum-count threshold | H2, H4 |
+| 5 | Per-haploblock SV-type enrichment | Length-adjusted Poisson tests across the complete block-by-type grid, with BH-FDR correction | Implemented |
 | 6 | Population-cluster correlation | Compare population-specific SV patterns with predefined SNV-based haplotype clusters | Proposed |
 | 7 | SV-based population structure reconstruction | Per-sample/per-haploblock SV matrix → PCA/UMAP and cluster-agreement summaries | Proposed visualization |
 | 8 | Duplication/inversion gene overlay | Gene overlap for supported recurrent/population-specific SV types; INV depends on a future Stage 0 that retains inversions | Proposed |
@@ -29,7 +29,7 @@ The schedule below is preserved from the initial planning pass. It is not the cu
 
 **Day 1 (Aug 25).** Original goal: stand up ingestion, QC, and intersection. Current replacement: Linh is developing Stage 0 merging, Stage 1 performs cluster-aware preprocessing from the existing pre-merged VCF, and Stage 2 is optional boundary classification.
 
-**Day 2 (Aug 26 — today).** Stages 3–5: boundary enrichment test, population-specific classification, and the size-adjusted per-block SV-type enrichment scan. This is the statistical core of the project — get p-values/FDR-corrected results on the real dataset today, even if plots/report are rough.
+**Day 2 (Aug 26).** Stages 4–5 now provide population-specific classification and a length-adjusted per-block SV-type enrichment scan. Stage 3 boundary enrichment remains a separate future decision.
 
 **Day 3 (Aug 27).** Stages 6–8 in parallel across the team (population-cluster correlation, SV-based clustering + ARI, gene overlay for Maria/Alistair's duplication/inversion question). Start Stage 9 integration in the afternoon so there's a working summary table before the final day.
 
@@ -38,7 +38,7 @@ The schedule below is preserved from the initial planning pass. It is not the cu
 ## Proposed testing and validation ideas
 
 - **Per-stage sanity checks on a small slice:** once the downstream analyses are selected, run those stages on one chromosome (e.g., chr22) or a synthetic haploblock+SV set before running genome-wide; confirm intersection counts (Stage 2), classification counts (Stage 4), and enrichment p-value distributions (Stage 5) look sane (e.g., p-values roughly uniform under a shuffled-label negative control).
-- **Negative controls:** re-run Stage 3's permutation test and Stage 5's regression on label-shuffled data — both should show no significant enrichment; a positive result on shuffled data indicates a pipeline bug, not a biological signal.
+- **Negative controls:** if Stage 3 is pursued, run its permutation test on shuffled data; also rerun Stage 5 after shuffling SV types among blocks. Neither should show systematic enrichment.
 - **End-to-end integration run:** once Stage 0 is implemented, execute the selected stages on one chromosome and confirm the expected outputs are populated.
 - **Validation against known structure:** if Stage 7 is pursued, compare SV-based structure with population labels supplied in `sample_metadata.tsv` before interpreting agreement with haploblocks.org clusters.
 - **Reproducibility check:** re-run the full pipeline twice with the same config (fixed seeds) and confirm identical output; re-run once with a different seed and confirm permutation/UMAP results are stable within expected tolerance.
@@ -46,7 +46,7 @@ The schedule below is preserved from the initial planning pass. It is not the cu
 ## Non-pip dependencies
 
 - `bcftools` and `truvari` — planned Stage 0 merge/collapse workflow being developed by Linh.
-- R is not required; the plan above is Python-only. If a team member prefers R for Stage 5/6 stats (e.g. `MASS::glm.nb`), that's a drop-in alternative to `statsmodels`, not a pipeline dependency.
+- R is not required; the implemented pipeline is Python-only. Stage 5 uses SciPy for its current Poisson tests.
 
 ## Current Stage 0 placeholder: cohort SV merging
 
@@ -156,6 +156,19 @@ python claude-first-prototype/pipeline/stage4_classify_af.py \
 
 The stage writes `sv_af_classification.tsv` with one row per SV and population, `sv_classification.tsv` with one row per SV, and a `config.yaml` that carries the Stage 1 paths forward. Stage 6 can join the one-row-per-SV classification to `sv_block_summary` and independently compare it with `cluster_memberships`.
 
+## Current Stage 5: per-haploblock SV-type enrichment
+
+`pipeline/stage5_type_enrichment.py` reads Stage 1's chromosome-specific `sv_block_summary` and `haploblocks` tables. It counts each unique SV–haploblock pair once, builds the complete haploblock-by-SV-type grid, and estimates each cell's expected count from block length and the overall rate for that SV type. Two-sided Poisson p-values are corrected together with Benjamini–Hochberg FDR.
+
+```bash
+python claude-first-prototype/pipeline/stage5_type_enrichment.py \
+  --config claude-first-prototype/stage1_output/config.yaml
+```
+
+The output `stage5_output/sv_type_enrichment.tsv` contains observed and expected counts, p- and q-values, and a configurable significance flag for every block/type combination. The accompanying config carries the Stage 1 paths forward and registers this output as `paths.sv_type_enrichment`.
+
+This is deliberately a readable first model with haploblock length as its only exposure adjustment. SNP density, callability, overdispersion, and minimum-count policies should be evaluated before treating significant cells as final biological results.
+
 ## Current testing status
 
-Focused contract tests cover Stage 1's normalized downstream tables, metadata canonicalization, and the distinction between exact boundary crossing and proximity. The earlier dbVar ingestion/QC tests described in the historical prototype no longer match the current pipeline.
+Focused contract tests cover Stage 1's normalized downstream tables, metadata canonicalization, the distinction between exact boundary crossing and proximity, Stage 4 population classification, and Stage 5's length-adjusted enrichment contract. The earlier dbVar ingestion/QC tests described in the historical prototype no longer match the current pipeline.
