@@ -1,6 +1,14 @@
 > Structural Variants Hackathon at Baylor College of Medicine, August 25-28, 2026
 
-# Haploblock_SV
+# 
+<h1 align="center">Haploblock SV</h1>
+
+<p align="center">
+  <img width="400" height="400" src="haploblocks_logo.png">
+ 
+  <h3 align="center">A pipeline for implicit analysis of structural variants within haploblocks.</h3>
+</p>
+
 
 # Quickstart
 Install dependencies:
