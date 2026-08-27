@@ -1,0 +1,56 @@
+{
+  "chrom": "chr21",
+  "downstream_output": "/Users/lynn.ly/projects/hackathon/Haploblock_SV/claude-first-prototype/cluster_aware_output/sv_to_clusters.chr21.tsv",
+  "sv_table": "/Users/lynn.ly/projects/hackathon/Haploblock_SV/claude-first-prototype/cluster_aware_output/_intermediate/sv_genotypes.chr21.tsv",
+  "sv_records": 83149,
+  "vcf_samples": 403,
+  "cluster_download": {
+    "source": "download",
+    "discovered": 597,
+    "downloaded": 597,
+    "reused": 0
+  },
+  "cluster_files": 597,
+  "cluster_membership_rows": 3042312,
+  "cluster_membership_rows_matching_vcf": 474018,
+  "sv_block_pairs": 60418,
+  "sv_block_pairs_without_callable_genotypes": 1144,
+  "converged_models": 57376,
+  "nonconverged_models": 1898,
+  "cluster_evaluations": 6236205,
+  "associated_cluster_rows": 30580,
+  "low_evidence_associations": 29575,
+  "cluster_probability_bins": {
+    "[0,0.25)": 6076562,
+    "[0.5,0.75)": 7683,
+    "[0.25,0.5)": 6211,
+    "[0.75,1]": 30584,
+    "missing": 115165
+  },
+  "cluster_call_rate_bins": {
+    "[0.75,1]": 6118951,
+    "[0,0.25)": 115165,
+    "[0.5,0.75)": 2076,
+    "[0.25,0.5)": 13
+  },
+  "heterozygote_assignment_status_counts": {
+    "assigned": 83199,
+    "same_cluster": 33244,
+    "ambiguous": 11150
+  },
+  "heterozygote_assignment_confidence_bins": {
+    "[0.75,1]": 116443,
+    "[0.5,0.75)": 11150
+  },
+  "association_class_counts": {
+    "zero": 51342,
+    "multiple": 3675,
+    "single": 5401
+  },
+  "multiple_cluster_fraction": 0.062000202449640655,
+  "association_threshold": 0.75,
+  "posterior_assignment_threshold": 0.75,
+  "max_iterations": 25,
+  "tolerance": 1e-05,
+  "intermediates_removed_after_success": true
+}
