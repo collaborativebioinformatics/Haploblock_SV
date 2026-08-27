@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 
 
-METADATA_COLUMNS = ["sv_id", "chrom", "start", "end", "sv_type", "length", "filter", "imprecise"]
+METADATA_COLUMNS = [
+    "sv_record_id", "sv_id", "chrom", "start", "end", "sv_type", "length", "filter", "imprecise",
+]
 
 
 def canonical_sample_id(sample_id: str) -> str:

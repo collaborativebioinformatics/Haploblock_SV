@@ -23,6 +23,7 @@ def test_stage4_reads_stage1_contract_and_classifies_each_sv_once(tmp_path: Path
     ).to_csv(metadata_path, sep="\t", index=False)
 
     metadata_columns = {
+        "sv_record_id": "",
         "chrom": "chr1",
         "start": 100,
         "end": 200,
@@ -34,7 +35,10 @@ def test_stage4_reads_stage1_contract_and_classifies_each_sv_once(tmp_path: Path
     sample_ids = ["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4"]
 
     def variant(sv_id: str, genotypes: list[str]) -> dict:
-        return {"sv_id": sv_id, **metadata_columns, **dict(zip(sample_ids, genotypes))}
+        return {
+            **metadata_columns, "sv_id": sv_id, "sv_record_id": f"record_{sv_id}",
+            **dict(zip(sample_ids, genotypes)),
+        }
 
     genotype_path = tmp_path / "sv_genotypes.chr1.tsv"
     pd.DataFrame(

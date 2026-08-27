@@ -44,7 +44,7 @@ def information_table(
     samples: list[str],
     min_diplotype_samples: int,
 ) -> pd.DataFrame:
-    keys = ["sv_id", "chrom", "start", "end"]
+    keys = ["sv_record_id"]
     dosages = sv[METADATA_COLUMNS].copy()
     for sample in samples:
         alternate, called = genotype_counts(sv[sample])
@@ -59,7 +59,7 @@ def information_table(
         block_diplotypes = diplotypes[diplotypes["haploblock_id"] == block_id]
         diplotype_by_sample = block_diplotypes.set_index("sample_id")["diplotype"]
         for _, block_variant in block_variants.iterrows():
-            key = tuple(block_variant[column] for column in keys)
+            key = block_variant["sv_record_id"]
             if key not in dosages.index:
                 continue
             variant = dosages.loc[key]

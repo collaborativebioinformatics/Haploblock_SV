@@ -52,7 +52,7 @@ def enrichment_table(
     q_threshold: float,
 ) -> pd.DataFrame:
     """Return the complete haploblock-by-SV-type enrichment table."""
-    assigned = sv_blocks.drop_duplicates(["sv_id", "haploblock_id"])
+    assigned = sv_blocks.drop_duplicates(["sv_record_id", "haploblock_id"])
     blocks = haploblocks.drop_duplicates("haploblock_id").copy()
     blocks["length"] = blocks["end"] - blocks["start"]
 

@@ -17,14 +17,14 @@ def test_information_gain_distinguishes_tagged_and_cluster_subdividing_svs() -> 
         "chrom": "chr1", "sv_type": "DEL", "length": 10,
         "filter": "PASS", "imprecise": False,
     }
-    tagged = {**base, "sv_id": "tagged", "start": 100, "end": 110}
-    mixed = {**base, "sv_id": "mixed", "start": 200, "end": 210}
+    tagged = {**base, "sv_record_id": "record_tagged", "sv_id": "tagged", "start": 100, "end": 110}
+    mixed = {**base, "sv_record_id": "record_mixed", "sv_id": "mixed", "start": 200, "end": 210}
     for index, sample in enumerate(samples):
         tagged[sample] = "0/1" if index < 8 else "0/0"
         mixed[sample] = "0/1" if index % 2 == 0 else "0/0"
     sv = pd.DataFrame([tagged, mixed])
     blocks = pd.DataFrame([
-        {"sv_id": row["sv_id"], "chrom": "chr1", "start": row["start"],
+            {"sv_record_id": row["sv_record_id"], "sv_id": row["sv_id"], "chrom": "chr1", "start": row["start"],
          "end": row["end"], "haploblock_id": "block"}
         for row in (tagged, mixed)
     ])
@@ -62,4 +62,3 @@ def test_pca_writes_reusable_deterministic_tables() -> None:
     second, _ = stage7_information_gain.pca_tables(sv, metadata, 1.0, 0.01, 2)
     pd.testing.assert_frame_equal(first, second)
     assert list(variance["n_variants"]) == [2, 2]
-

@@ -26,8 +26,9 @@ def test_stage5_uses_unique_sv_block_pairs_and_flags_spike(tmp_path: Path) -> No
     def add_variants(block: str, sv_type: str, count: int) -> None:
         for _ in range(count):
             rows.append(
-                {
-                    "sv_id": f"sv{len(rows)}",
+                    {
+                        "sv_record_id": f"record{len(rows)}",
+                        "sv_id": f"sv{len(rows)}",
                     "haploblock_id": block,
                     "sv_type": sv_type,
                 }

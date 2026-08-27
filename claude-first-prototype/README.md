@@ -79,7 +79,7 @@ Kanpig needs resolved variant sequences, so this current input contains DEL and 
 
 ## Current Stage 1: cluster-aware preprocessing
 
-`pipeline/stage1_cluster_aware.py` is the implemented entry point. It reads the merged VCF directly, downloads or reuses the per-block cluster membership files from data.haploblocks.org, and infers which haploblock cluster or clusters carry each SV.
+`pipeline/stage1_cluster_aware.py` is the implemented entry point. It reads the merged VCF directly, downloads or reuses the per-block cluster membership files from data.haploblocks.org, downloads the matching 1000 Genomes metadata and Ensembl GRCh38 gene annotation unless local paths are supplied, and infers which haploblock cluster or clusters carry each SV.
 
 ```bash
 python claude-first-prototype/pipeline/stage1_cluster_aware.py
@@ -87,13 +87,14 @@ python claude-first-prototype/pipeline/stage1_cluster_aware.py
 
 The default output directory is `claude-first-prototype/stage1_output/`. Chromosomes are processed separately so work can be parallelized and rerun selectively. Stage 1 now keeps the normalized inputs needed by later analyses instead of treating them as temporary files:
 
-- `sv_genotypes.<chrom>.tsv`: one row per SV, with normalized metadata followed by one raw GT column per sample. This is the Stage 4 and Stage 7 genotype contract.
+- `sv_genotypes.<chrom>.tsv`: one row per input VCF record, with normalized metadata followed by one raw GT column per sample. `sv_record_id` is the unique record key; `sv_id` is retained as a potentially repeated source label. This is the Stage 4 and Stage 7 genotype contract.
 - `samples.tsv`: canonical sample IDs and their original VCF IDs.
-- `sample_metadata.tsv`: when `--sample-metadata` is supplied, a VCF-ordered copy containing only cohort samples and using the canonical IDs from `samples.tsv`.
+- `sample_metadata.tsv`: a VCF-ordered copy of the automatically downloaded metadata (or `--sample-metadata`) containing represented samples and using the canonical IDs from `samples.tsv`.
+- `Homo_sapiens.GRCh38.115.gtf.gz`: the automatically downloaded Ensembl annotation (or `--gtf`), registered for Stage 8.
 - `haploblocks.<chrom>.tsv`: one row per haploblock.
 - `cluster_memberships.<chrom>.tsv`: one row per represented sample haplotype and haploblock cluster. This is the independent cluster input for Stages 6 and 7.
-- `sv_block_summary.<chrom>.tsv`: one row per overlapping SV and haploblock, including association counts but never duplicating a pair by passing cluster. This is the counting input for Stage 5.
-- `sv_to_clusters.<chrom>.tsv`: one row per SV, haploblock, and cluster that passes the association threshold.
+- `sv_block_summary.<chrom>.tsv`: one row per overlapping VCF record and haploblock, including association counts but never duplicating a pair by passing cluster. This is the counting input for Stage 5.
+- `sv_to_clusters.<chrom>.tsv`: one row per VCF record, haploblock, and cluster that passes the association threshold.
 
 All paths are registered in `stage1_output/config.yaml`. Population labels remain independent of cluster inference: pass the Stage 0 table with `--sample-metadata` to normalize and publish it for Stages 4, 6, and 7. Useful method diagnostics are kept under `debug_and_qc/`; downloaded cluster files remain temporary and are removed after a successful run.
 
@@ -101,23 +102,25 @@ The table keys and row meanings are part of the contract:
 
 | Path key | One row per | Required identity columns |
 |---|---|---|
-| `sv_genotypes` | input VCF record | `sv_id`, `chrom`, `start`, `end`, `sv_type`; sample GT columns follow the fixed metadata columns |
+| `sv_genotypes` | input VCF record | `sv_record_id` (unique); `sv_id`, `chrom`, `start`, `end`, and `sv_type` describe the record; sample GT columns follow the fixed metadata columns |
 | `haploblocks` | haploblock | `haploblock_id`, `chrom`, `start`, `end` |
 | `cluster_memberships` | complete sample haplotype assignment | `haploblock_id`, `sample_id`, `haplotype`, `cluster_id` |
-| `sv_block_summary` | overlapping SV–haploblock pair | `sv_id`, `haploblock_id`; this key is unique even when several clusters pass |
-| `sv_to_clusters` | passing SV–haploblock–cluster association | `sv_id`, `haploblock_id`, `cluster_id` |
+| `sv_block_summary` | overlapping VCF-record–haploblock pair | `sv_record_id`, `haploblock_id`; this key is unique even when several clusters pass |
+| `sv_to_clusters` | passing VCF-record–haploblock–cluster association | `sv_record_id`, `haploblock_id`, `cluster_id` |
 
 The supplied `sample_metadata` table must provide `sample_id` and `population`. Stage 1 accepts original or canonical sample IDs, writes canonical IDs, removes metadata rows for samples absent from the VCF, and orders the result like the VCF. A `superpopulation` column may also be supplied, but downstream analyses must state explicitly which grouping they use.
 
-### Downstream ownership
+### Downstream ownership and table grain
 
 | Stage | Stage 1 inputs |
 |---|---|
-| 4 | Classify every row in `sv_genotypes` once using `sample_metadata`; join `sv_block_summary` afterward for block-level summaries |
-| 5 | `sv_block_summary` and `haploblocks`; count unique `sv_id, haploblock_id` pairs |
-| 6 | Stage 4 classifications plus `cluster_memberships` and `sample_metadata` |
-| 7 | `sv_genotypes`, `cluster_memberships`, and `sample_metadata` |
-| 8 | Stage 4 classifications plus SV coordinates and types from `sv_genotypes` |
+| 4 | `sv_genotypes` and `sample_metadata`; classify every `sv_record_id` once, before any haploblock join |
+| 5 | `sv_block_summary` and `haploblocks`; count unique `sv_record_id, haploblock_id` pairs |
+| 6 | `sv_genotypes`, `sv_block_summary`, `cluster_memberships`, and `sample_metadata`; test every record against every cluster in each overlapped block, including clusters that do not pass Stage 1's association threshold |
+| 7 | `sv_genotypes`, `sv_block_summary`, `cluster_memberships`, and `sample_metadata`; measure information gained by the local diplotype for every record–block pair |
+| 8 | Stage 6 `sv_cluster_summary`, optional Stage 4 classifications, and the registered GTF; annotate one prioritized record–block candidate per Stage 6 summary row |
+
+Use `sv_to_clusters` when the question is “which clusters pass the Stage 1 association rule for this SV?” It is intentionally thresholded and may contain several rows for a record. Use `sv_block_summary` with the distinct cluster IDs from `cluster_memberships` when the question is “which clusters could contain this SV?” That join preserves every overlapping record–block pair and every cluster defined in the block; it is the candidate universe used by Stages 6 and 7. Use `sv_genotypes` alone when every original VCF record must be retained independently of haploblock overlap or cluster assignment.
 
 ### Interpreting `sv_to_clusters.tsv`
 
@@ -127,7 +130,8 @@ The main fields are:
 
 | Field | Interpretation |
 |---|---|
-| `sv_id` | Input VCF ID when it is short enough. IDs longer than the configured limit are replaced with `SV_<chrom>_<start>_<end>_<type>_<hash>`, where the hash preserves uniqueness. |
+| `sv_record_id` | Unique, stable identifier for one input VCF record within the run, formatted `chrN_record_k`. Use it for joins and counts. |
+| `sv_id` | Input VCF ID when it is short enough. It is a source label, not a unique key: callers can reuse it for records at the same coordinates. IDs longer than the configured limit are replaced with `SV_<chrom>_<start>_<end>_<type>_<hash>`. |
 | `chrom`, `start`, `end` | SV coordinates in 0-based, half-open convention. |
 | `sv_type`, `length`, `filter`, `imprecise` | Metadata retained from or derived from the input VCF. |
 | `block_start`, `block_end` | Haploblock region whose cluster membership was evaluated. These coordinates identify the context; they are not themselves evidence of association. |
@@ -213,15 +217,14 @@ python claude-first-prototype/pipeline/stage7_information_gain.py \
 
 ## Rescoped Stage 8: consequence-aware candidate annotation
 
-`pipeline/stage8_candidate_annotation.py` joins Stage 6 candidates to a supplied GTF and labels
+`pipeline/stage8_candidate_annotation.py` joins Stage 6 candidates to the GTF registered by Stage 1 (or an optional `--gtf` override) and labels
 consequences according to SV type. In particular, inversion breakpoint disruption is kept distinct
 from genes merely contained in an inverted span. The candidate score combines explicit association,
 annotation, and call-quality components for triage and is not interpreted as evidence of causality.
 
 ```bash
 python claude-first-prototype/pipeline/stage8_candidate_annotation.py \
-  --config claude-first-prototype/stage6_output/config.yaml \
-  --gtf path/to/genes.gtf
+  --config claude-first-prototype/stage6_output/config.yaml
 ```
 
 ## Current testing status

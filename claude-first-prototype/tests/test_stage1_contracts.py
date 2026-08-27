@@ -56,6 +56,7 @@ def test_stage1_publishes_downstream_contract(tmp_path: Path) -> None:
         [
             "--vcf", str(vcf_path),
             "--sample-metadata", str(metadata_path),
+            "--gtf", str(tmp_path / "genes.gtf"),
             "--cluster-root", str(tmp_path / "clusters"),
             "--chroms", "chr1",
             "--chrom-workers", "1",
@@ -93,6 +94,7 @@ def test_stage1_publishes_downstream_contract(tmp_path: Path) -> None:
 
     genotypes = read_tsv(out_dir / "sv_genotypes.chr1.tsv")
     assert [row["sv_id"] for row in genotypes] == ["sv1", "sv2"]
+    assert [row["sv_record_id"] for row in genotypes] == ["chr1_record_1", "chr1_record_2"]
     assert genotypes[0]["NA00001"] == "0/1"
     assert genotypes[1]["SAMPLE2"] == "./."
 
@@ -161,6 +163,10 @@ def test_stage1_downloads_default_ont_metadata(tmp_path: Path, monkeypatch) -> N
     )
     assert config["paths"]["sample_metadata"] == str(
         (out_dir / "sample_metadata.tsv").resolve()
+    )
+    assert config["data_sources"]["gtf"] == stage1_cluster_aware.DEFAULT_GTF_URL
+    assert config["paths"]["gtf"] == str(
+        (out_dir / "Homo_sapiens.GRCh38.115.gtf.gz").resolve()
     )
 
 

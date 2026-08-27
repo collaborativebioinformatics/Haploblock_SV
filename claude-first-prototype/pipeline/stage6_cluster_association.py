@@ -112,7 +112,7 @@ def association_table(
         if sample in sv.columns[len(METADATA_COLUMNS):]
     ]
     population_by_sample = metadata.set_index("sample_id")["population"].astype(str).to_dict()
-    variant_key = ["sv_id", "chrom", "start", "end"]
+    variant_key = ["sv_record_id"]
     dosages = dosage_table(sv, samples).set_index(variant_key, drop=False)
     memberships = memberships[memberships["sample_id"].astype(str).isin(samples)].copy()
     memberships["sample_id"] = memberships["sample_id"].astype(str)
@@ -133,7 +133,7 @@ def association_table(
             )
         )
         for _, block_variant in block_variants.iterrows():
-            key = tuple(block_variant[column] for column in variant_key)
+            key = block_variant["sv_record_id"]
             if key not in dosages.index:
                 continue
             variant = dosages.loc[key]
@@ -201,7 +201,7 @@ def summarize_associations(
     best = (
         associations.assign(abs_r=associations["population_adjusted_r"].abs())
         .sort_values(["q_value", "abs_r"], ascending=[True, False])
-        .drop_duplicates(["sv_id", "chrom", "start", "end", "haploblock_id"])
+        .drop_duplicates(["sv_record_id", "haploblock_id"])
         .copy()
     )
     significant = (best["q_value"] < q_threshold) & (best["abs_r"] >= min_abs_r)

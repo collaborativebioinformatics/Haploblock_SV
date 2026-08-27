@@ -113,6 +113,7 @@ def split_vcf_by_chromosome(
                     genotype_counts[chrom][genotype] += 1
                 writers[chrom].writerow(
                     [
+                        f"{chrom}_record_{record_counts[chrom] + 1}",
                         sv_id, chrom, start, end, sv_type, parse_length(info, start, end),
                         fields[6], "IMPRECISE" in info,
                     ]
@@ -312,8 +313,8 @@ def load_sv_table(path: Path) -> tuple[list[str], list[SVRecord]]:
             records.append(
                 SVRecord(
                     metadata=row[: len(METADATA_COLUMNS)],
-                    start=int(row[2]),
-                    end=int(row[3]),
+                    start=int(row[3]),
+                    end=int(row[4]),
                     dosages=np.fromiter(
                         (
                             -1 if (dosage := genotype_dosage(genotype)) is None else dosage

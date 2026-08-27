@@ -9,6 +9,7 @@ candidate score intended for triage, not as a claim of causality.
 from __future__ import annotations
 
 import argparse
+import gzip
 import math
 import re
 import sys
@@ -18,6 +19,7 @@ import pandas as pd
 import yaml
 
 from stage4_classify_af import resolve_path
+from sv_contract import normalize_chrom
 
 
 def gtf_attributes(text: str) -> dict[str, str]:
@@ -29,7 +31,8 @@ def gtf_attributes(text: str) -> dict[str, str]:
 
 def read_gtf(path: Path) -> pd.DataFrame:
     rows = []
-    with path.open() as handle:
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt") as handle:
         for line in handle:
             if line.startswith("#"):
                 continue
@@ -38,7 +41,7 @@ def read_gtf(path: Path) -> pd.DataFrame:
                 continue
             attributes = gtf_attributes(fields[8])
             rows.append({
-                "chrom": fields[0],
+                "chrom": normalize_chrom(fields[0]),
                 "feature": fields[2],
                 "start": int(fields[3]) - 1,
                 "end": int(fields[4]),
@@ -137,7 +140,7 @@ def annotate_candidates(
         annotations, index=result.index
     )
     if classifications is not None:
-        keys = ["sv_id", "chrom", "start", "end"]
+        keys = ["sv_record_id"]
         classification_columns = keys + [
             column for column in ("sv_class", "specific_to_population")
             if column in classifications
@@ -171,7 +174,7 @@ def annotate_candidates(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--gtf", type=Path, required=True)
+    parser.add_argument("--gtf", type=Path, default=None)
     parser.add_argument("--out-dir", type=Path, default=Path("stage8_output"))
     return parser.parse_args(argv)
 
@@ -188,7 +191,8 @@ def main(argv: list[str] | None = None) -> None:
         classifications = pd.read_csv(
             resolve_path(config["paths"]["sv_classification"], config_dir), sep="\t"
         )
-    result = annotate_candidates(candidates, read_gtf(args.gtf), classifications)
+    gtf_path = args.gtf or resolve_path(config["paths"]["gtf"], config_dir)
+    result = annotate_candidates(candidates, read_gtf(gtf_path), classifications)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     output_path = args.out_dir / "annotated_sv_candidates.tsv"
     result.to_csv(output_path, sep="\t", index=False)

@@ -28,6 +28,10 @@ DEFAULT_SAMPLE_METADATA_URL = (
     "https://s3.amazonaws.com/1000g-ont/PROCESSED_DATA/"
     "1kGP_LRSC_500_ONT_Metadata.tsv"
 )
+DEFAULT_GTF_URL = (
+    "https://ftp.ensembl.org/pub/release-115/gtf/homo_sapiens/"
+    "Homo_sapiens.GRCh38.115.gtf.gz"
+)
 METADATA_COLUMN_NAMES = {
     "NHGRI_ID": "sample_id",
     "SubPopulation": "population",
@@ -80,6 +84,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Override the default 1000 Genomes ONT sample metadata table",
     )
+    parser.add_argument(
+        "--gtf",
+        type=Path,
+        default=None,
+        help="Override the default Ensembl GRCh38 gene annotation",
+    )
     parser.add_argument("--out-dir", type=Path, default=Path("stage1_output"))
     parser.add_argument("--chroms", default="all", help="Comma-separated chromosomes or 'all' for chr1-22,X")
     parser.add_argument("--cluster-base-url", default="https://data.haploblocks.org/haploblock_hashes/1000G")
@@ -108,6 +118,13 @@ def main(argv: list[str] | None = None) -> None:
         metadata_source.write_bytes(
             request_with_retries(DEFAULT_SAMPLE_METADATA_URL, args.retries)
         )
+
+    gtf_source = args.gtf
+    if gtf_source is None:
+        gtf_source = args.out_dir / Path(DEFAULT_GTF_URL).name
+        if not gtf_source.exists():
+            log.info("Downloading gene annotation from %s", DEFAULT_GTF_URL)
+            gtf_source.write_bytes(request_with_retries(DEFAULT_GTF_URL, args.retries))
 
     log.info("Running cluster-aware preprocessing for %d chromosome(s)", len(chroms))
     run_cluster_aware(
@@ -142,6 +159,7 @@ def main(argv: list[str] | None = None) -> None:
             "haploblock_clusters": (
                 str(args.cluster_root.resolve()) if args.cluster_root is not None else args.cluster_base_url
             ),
+            "gtf": str(gtf_source.resolve()) if args.gtf is not None else DEFAULT_GTF_URL,
         },
         "thresholds": {
             "association_probability": args.association_threshold,
@@ -177,6 +195,7 @@ def main(argv: list[str] | None = None) -> None:
                 for chrom in chroms
             },
             "debug_and_qc": str((args.out_dir / "debug_and_qc").resolve()),
+            "gtf": str(gtf_source.resolve()),
         },
     }
     config["data_sources"]["sample_metadata"] = (

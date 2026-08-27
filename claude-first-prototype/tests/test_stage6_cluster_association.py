@@ -19,10 +19,12 @@ def test_within_population_test_separates_portable_from_ancestry_signal() -> Non
     })
     variant_rows = [
         {
+            "sv_record_id": "record_portable",
             "sv_id": "portable", "chrom": "chr1", "start": 100, "end": 150,
             "sv_type": "DEL", "length": 50, "filter": "PASS", "imprecise": False,
         },
         {
+            "sv_record_id": "record_ancestry",
             "sv_id": "ancestry", "chrom": "chr1", "start": 200, "end": 250,
             "sv_type": "DEL", "length": 50, "filter": "PASS", "imprecise": False,
         },
@@ -33,9 +35,9 @@ def test_within_population_test_separates_portable_from_ancestry_signal() -> Non
         variant_rows[1][sample] = "0/1" if sample.startswith("A") else "0/0"
     sv = pd.DataFrame(variant_rows)
     sv_blocks = pd.DataFrame([
-        {"sv_id": "portable", "chrom": "chr1", "start": 100, "end": 150,
+        {"sv_record_id": "record_portable", "sv_id": "portable", "chrom": "chr1", "start": 100, "end": 150,
          "haploblock_id": "block1"},
-        {"sv_id": "ancestry", "chrom": "chr1", "start": 200, "end": 250,
+        {"sv_record_id": "record_ancestry", "sv_id": "ancestry", "chrom": "chr1", "start": 200, "end": 250,
          "haploblock_id": "block2"},
     ])
 
@@ -66,21 +68,22 @@ def test_within_population_test_separates_portable_from_ancestry_signal() -> Non
     assert ancestry["association_pattern"] == "no_detected_cluster_signal"
 
 
-def test_variant_coordinates_disambiguate_reused_vcf_ids() -> None:
+def test_record_ids_disambiguate_reused_vcf_ids_and_coordinates() -> None:
     samples = [f"S{i}" for i in range(8)]
     metadata = pd.DataFrame({"sample_id": samples, "population": ["P"] * 8})
     rows = []
-    for start, carriers in ((100, {"S0", "S1", "S2", "S3"}), (200, set())):
+    for record_id, carriers in (("record_1", {"S0", "S1", "S2", "S3"}), ("record_2", set())):
         row = {
-            "sv_id": "reused", "chrom": "chr1", "start": start, "end": start + 10,
+            "sv_record_id": record_id,
+            "sv_id": "reused", "chrom": "chr1", "start": 100, "end": 110,
             "sv_type": "INS", "length": 10, "filter": "PASS", "imprecise": False,
         }
         row.update({sample: "0/1" if sample in carriers else "0/0" for sample in samples})
         rows.append(row)
     blocks = pd.DataFrame([
-        {"sv_id": "reused", "chrom": "chr1", "start": start, "end": start + 10,
-         "haploblock_id": "block"}
-        for start in (100, 200)
+        {"sv_record_id": record_id, "sv_id": "reused", "chrom": "chr1", "start": 100, "end": 110,
+             "haploblock_id": "block"}
+        for record_id in ("record_1", "record_2")
     ])
     memberships = pd.DataFrame([
         {"haploblock_id": "block", "sample_id": sample, "haplotype": haplotype,
@@ -91,5 +94,4 @@ def test_variant_coordinates_disambiguate_reused_vcf_ids() -> None:
         pd.DataFrame(rows), blocks, memberships, metadata,
         permutations=19, seed=2, min_cluster_haplotypes=4, min_population_samples=4,
     )
-    assert set(result["start"]) == {100}
-
+    assert set(result["sv_record_id"]) == {"record_1"}

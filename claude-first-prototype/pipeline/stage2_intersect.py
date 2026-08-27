@@ -103,6 +103,7 @@ def load_sv_metadata(vcf_path: Path, chroms: list[str], max_id_length: int) -> d
             source_id = fields[2] if fields[2] != "." else f"{chrom}:{position}:{sv_type}:{record_counts[chrom] + 1}"
             rows[chrom].append(
                 {
+                    "sv_record_id": f"{chrom}_record_{record_counts[chrom] + 1}",
                     "sv_id": simplify_sv_id(source_id, chrom, start, end, sv_type, max_id_length),
                     "chrom": chrom,
                     "start": start,
