@@ -110,10 +110,19 @@ The purpose of Stage 2 is to classify SVs based on their positional relationship
 
 These results provide a quantification on how SVs are distributed relative to haploblock regions. In addition to their positional classification, 17,222 SVs were classified as near boundary, indication that they occur close to a haploblock boundary, whereas 65,927 Svs were classified as not near boundary. 
 
-The purpose of Stage 4 is to classify each structural variant (SV) according to its allele frequency (AF) distribution across population subgroups within the cohort and to associate these classifications with haploblocks. This analysis enables the identification of population haploblocks with enriched population-specific SVs but it does not test association with the SNV-derived clusters. 
+The purpose of Stage 4 is to classify each structural variant (SV) according to its allele frequency (AF) distribution across population subgroups within the cohort and to associate these classifications with haploblocks as hown in Table 1.
+
+Table 1. Chromosome 21 classification based on the cohor population AF
+| Position class | Count | Definiton| 
+|---|---|---|
+|common|5,224|AF meets the presence threshold in at least two subpopulations|
+|population_specific|1,657|AF meets it in exactly one population and is below the absence threshold in all other populations with data.|
+|other|76,268|Insufficient data, rare/absent, or an intermediate pattern not captured by the two classes..|
 
 ![Stage 4 haploblock SV classification](figures/haploblock_sv_classification.png)
 Figure 1-stage4: The figure illustrates the distribution of structural variant (SV) composition across haploblocks on chromosome 21, based on allele frequencies observed in the study cohort. 
+
+The population-specific variants are distributed across many subpopulations and haploblocks with the largest counts associated with PEL, YRI, PJL, LWK and ACB. 
 
 ![Stage 4 haploblock SV classification](figures/population_specific_by_haploblock.png)
 Figure 2-stage4: Top 30 haplablocks ranked by the number of unique structural variants (SVs) observed exclusively within each subpopulation. Each unique SV is counted once per subpopulation, provided that at least two samples carry the SV.
