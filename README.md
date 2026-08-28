@@ -139,5 +139,8 @@ Stage 6 (Review of data in progress)
 - Verify all stages results and modify them as need it.  
 
 
+# Special thank you to the hackathon organizers!
+
+
 # References
 https://osf.io/preprints/biohackrxiv/xhkc3_v1
