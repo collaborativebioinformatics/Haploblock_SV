@@ -139,8 +139,17 @@ Stage 6 (Review of data in progress)
 - Verify all stages results and modify them as need it.  
 
 
-# Special thank you to the hackathon organizers!
+# Acknowledgements
+
+Special thank you to the hackathon organizers!
+
+The computing resources for this project were sponsored by [DNAnexus](https://www.dnanexus.com).
 
 
 # References
-https://osf.io/preprints/biohackrxiv/xhkc3_v1
+
+1. Kubica J, Jethwani H, Banecki KH, Moldes M, Plewczynski D, Busby B. Decoding complex genotype-phenotype interactions by discretizing the genome. 2025. doi:10.37044/osf.io/xhkc3_v1
+2. haploblocks.org
+3. International HapMap Consortium. A haplotype map of the human genome. Nature. 2005;437: 1299–1320. doi:10.1038/nature04226
+4. Claussnitzer M, Cho JH, Collins R, Cox NJ, Dermitzakis ET, Hurles ME, et al. A brief history of human disease genetics. Nature. 2020;577: 179–189. doi:10.1038/s41586-019-1879-7
+6. The 1000 Genomes Project Consortium, Corresponding authors, Auton A, Abecasis GR, Steering committee, Altshuler DM (Co-Chair), et al. A global reference for human genetic variation. Nature. 2015;526: 68–74. doi:10.1038/nature15393
