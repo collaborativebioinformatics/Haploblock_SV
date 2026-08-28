@@ -11,6 +11,7 @@ import argparse
 import gzip
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -142,14 +143,27 @@ def annotate_candidates(
     features: pd.DataFrame,
     classifications: pd.DataFrame | None = None,
     representation: pd.DataFrame | None = None,
+    threads: int = 1,
 ) -> pd.DataFrame:
     result = candidates.copy()
     features_by_chrom = {chrom: group for chrom, group in features.groupby("chrom")}
     empty_features = features.iloc[0:0]
-    annotations = [
-        annotate_variant(row, features_by_chrom.get(row["chrom"], empty_features))
-        for _, row in result.iterrows()
-    ]
+    chunk_size = max(1, (len(result) + threads * 4 - 1) // (threads * 4))
+    chunks = [result.iloc[start:start + chunk_size] for start in range(0, len(result), chunk_size)]
+
+    def annotate_chunk(chunk: pd.DataFrame) -> list[tuple[str, str, str]]:
+        return [
+            annotate_variant(row, features_by_chrom.get(row["chrom"], empty_features))
+            for _, row in chunk.iterrows()
+        ]
+
+    if chunks:
+        with ThreadPoolExecutor(max_workers=min(threads, len(chunks))) as executor:
+            annotations = [
+                annotation for chunk in executor.map(annotate_chunk, chunks) for annotation in chunk
+            ]
+    else:
+        annotations = []
     result[["consequence", "genes", "overlap_basis"]] = pd.DataFrame(
         annotations, index=result.index
     )
@@ -208,6 +222,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--gtf", type=Path, default=None)
     parser.add_argument("--out-dir", type=Path, default=Path("stage8_output"))
+    parser.add_argument("--threads", type=int, default=8)
     return parser.parse_args(argv)
 
 
@@ -230,7 +245,7 @@ def main(argv: list[str] | None = None) -> None:
         )
     gtf_path = args.gtf or resolve_path(config["paths"]["gtf"], config_dir)
     result = annotate_candidates(
-        candidates, read_gtf(gtf_path), classifications, representation
+        candidates, read_gtf(gtf_path), classifications, representation, args.threads
     )
     args.out_dir.mkdir(parents=True, exist_ok=True)
     output_path = args.out_dir / "annotated_sv_candidates.tsv"

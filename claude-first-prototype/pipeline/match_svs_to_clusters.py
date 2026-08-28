@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import pysam
 
 from sv_contract import (
     METADATA_COLUMNS,
@@ -49,8 +50,9 @@ def split_vcf_by_chromosome(
     chroms: list[str],
     out_dir: Path,
     max_sv_id_length: int,
+    chrom_workers: int = 1,
 ) -> dict[str, Path]:
-    """Stream the VCF once and write one downstream genotype table per chromosome."""
+    """Write one downstream genotype table per chromosome, using a Tabix index when available."""
     qc_dir = out_dir / "debug_and_qc"
     out_dir.mkdir(parents=True, exist_ok=True)
     qc_dir.mkdir(parents=True, exist_ok=True)
@@ -66,6 +68,71 @@ def split_vcf_by_chromosome(
     canonical_samples: list[str] | None = None
 
     try:
+        if not Path(f"{vcf_path}.tbi").exists():
+            log.info("Creating a Tabix index for %s", vcf_path)
+            pysam.tabix_index(str(vcf_path), preset="vcf")
+        with pysam.VariantFile(vcf_path) as source:
+            original_samples = list(source.header.samples)
+            canonical_samples = [canonical_sample_id(sample) for sample in original_samples]
+            if len(canonical_samples) != len(set(canonical_samples)):
+                duplicates = sorted(
+                    sample for sample, count in Counter(canonical_samples).items() if count > 1
+                )
+                raise ValueError(f"Sample-ID canonicalization creates duplicate columns: {duplicates}")
+            for chrom in chroms:
+                handle = paths[chrom].open("w", newline="")
+                handles[chrom] = handle
+                writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+                writers[chrom] = writer
+                writer.writerow(METADATA_COLUMNS + canonical_samples)
+            def extract_chromosome(requested_chrom: str) -> None:
+                with pysam.VariantFile(vcf_path) as indexed_source:
+                    for record in indexed_source.fetch(requested_chrom):
+                        line = str(record)
+                        fields = line.rstrip("\n").split("\t")
+                        chrom = normalize_chrom(fields[0])
+                        pos = int(fields[1])
+                        info = parse_info(fields[7])
+                        start = pos - 1
+                        end_value = info.get("END")
+                        end = int(end_value) if isinstance(end_value, str) and end_value != "." else pos
+                        sv_type = str(info.get("SVTYPE", "MISSING"))
+                        source_sv_id = fields[2] if fields[2] != "." else f"{chrom}:{pos}:{sv_type}:{record_counts[chrom] + 1}"
+                        sv_id = simplify_sv_id(source_sv_id, chrom, start, end, sv_type, max_sv_id_length)
+                        shortened_counts[chrom] += sv_id != source_sv_id
+
+                        format_keys = fields[8].split(":")
+                        gt_index = format_keys.index("GT")
+                        genotypes = []
+                        for sample_field in fields[9:]:
+                            genotype = sample_field.split(":")[gt_index]
+                            genotypes.append(genotype)
+                            genotype_counts[chrom][genotype] += 1
+                        writers[chrom].writerow(
+                            [
+                                f"{chrom}_record_{record_counts[chrom] + 1}",
+                                sv_id, chrom, start, end, sv_type, parse_length(info, start, end),
+                                fields[6], "IMPRECISE" in info,
+                            ]
+                            + genotypes
+                        )
+                        record_counts[chrom] += 1
+                        filter_counts[chrom][fields[6]] += 1
+
+            with ThreadPoolExecutor(max_workers=min(chrom_workers, len(chroms))) as executor:
+                futures = [executor.submit(extract_chromosome, chrom) for chrom in chroms]
+                for future in futures:
+                    future.result()
+    except (OSError, ValueError) as error:
+        log.warning("Indexed VCF access unavailable (%s); streaming the VCF instead", error)
+        for handle in handles.values():
+            handle.close()
+        handles.clear()
+        writers.clear()
+        record_counts.clear()
+        shortened_counts.clear()
+        filter_counts = {chrom: Counter() for chrom in chroms}
+        genotype_counts = {chrom: Counter() for chrom in chroms}
         with gzip.open(vcf_path, "rt") as source:
             for line in source:
                 if line.startswith("##"):
@@ -913,8 +980,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cluster-base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--cluster-root", type=Path, default=None, help="Use local <root>/<chrom> cluster files")
     parser.add_argument("--out-dir", type=Path, default=Path("stage1_output"))
-    parser.add_argument("--chrom-workers", type=int, default=4)
-    parser.add_argument("--download-workers", type=int, default=4)
+    parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--max-sv-id-length", type=int, default=80)
     parser.add_argument("--association-threshold", type=float, default=0.75)
@@ -949,6 +1015,8 @@ def run(args: argparse.Namespace) -> None:
     if completed_at_start:
         log.info("Reusing completed outputs for: %s", ", ".join(completed_at_start))
 
+    chrom_workers = min(args.threads, len(pending_chroms)) if pending_chroms else 1
+    download_workers = max(1, args.threads // chrom_workers)
     sv_tables = {}
     if pending_chroms:
         sv_tables = reusable_sv_tables(
@@ -956,11 +1024,11 @@ def run(args: argparse.Namespace) -> None:
         )
         if sv_tables is None:
             sv_tables = split_vcf_by_chromosome(
-                args.vcf, pending_chroms, args.out_dir, args.max_sv_id_length
+                args.vcf, pending_chroms, args.out_dir, args.max_sv_id_length, chrom_workers
             )
 
     if pending_chroms:
-        with ThreadPoolExecutor(max_workers=min(args.chrom_workers, len(pending_chroms))) as executor:
+        with ThreadPoolExecutor(max_workers=chrom_workers) as executor:
             futures = {
                 executor.submit(
                     process_chromosome,
@@ -969,7 +1037,7 @@ def run(args: argparse.Namespace) -> None:
                     args.out_dir,
                     args.cluster_base_url,
                     args.cluster_root,
-                    args.download_workers,
+                    download_workers,
                     args.retries,
                     args.association_threshold,
                     args.posterior_threshold,
@@ -992,8 +1060,9 @@ def run(args: argparse.Namespace) -> None:
         "completed_chromosomes": completed_chroms,
         "last_invocation": {
             "requested_chromosomes": chroms,
-            "chromosome_workers": args.chrom_workers,
-            "download_workers_per_chromosome": args.download_workers,
+            "threads": args.threads,
+            "chromosome_workers": chrom_workers,
+            "download_workers_per_chromosome": download_workers,
         },
         "outputs": {
             chrom: {

@@ -59,8 +59,7 @@ def test_stage1_publishes_downstream_contract(tmp_path: Path) -> None:
             "--gtf", str(tmp_path / "genes.gtf"),
             "--cluster-root", str(tmp_path / "clusters"),
             "--chroms", "chr1",
-            "--chrom-workers", "1",
-            "--download-workers", "1",
+            "--threads", "1",
             "--out-dir", str(out_dir),
         ]
     )

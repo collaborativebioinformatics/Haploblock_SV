@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -20,12 +21,12 @@ from stage4_classify_af import genotype_counts, resolve_path
 from sv_contract import METADATA_COLUMNS
 
 
-def entropy(values: np.ndarray) -> float:
-    if len(values) == 0:
-        return np.nan
-    frequencies = np.bincount(values.astype(int), minlength=2) / len(values)
-    frequencies = frequencies[frequencies > 0]
-    return float(-np.sum(frequencies * np.log2(frequencies)))
+COMMON_GT_DOSAGES = {
+    "0|0": 0.0, "0/0": 0.0, "0": 0.0,
+    "0|1": 1.0, "1|0": 1.0, "0/1": 1.0, "1/0": 1.0, "1": 1.0,
+    "1|1": 2.0, "1/1": 2.0,
+    ".": np.nan, ".|.": np.nan, "./.": np.nan,
+}
 
 
 def diplotype_table(memberships: pd.DataFrame) -> pd.DataFrame:
@@ -36,6 +37,51 @@ def diplotype_table(memberships: pd.DataFrame) -> pd.DataFrame:
         .rename("diplotype")
         .reset_index()
     )
+
+
+def dosage_matrix_from_genotypes(sv: pd.DataFrame, samples: list[str]) -> np.ndarray:
+    """Return variant-by-sample dosages, using a fast path for ordinary biallelic GTs."""
+    matrix = np.empty((len(sv), len(samples)), dtype=float)
+    for sample_index, sample in enumerate(samples):
+        genotype = sv[sample]
+        if pd.api.types.is_numeric_dtype(genotype):
+            matrix[:, sample_index] = pd.to_numeric(genotype, errors="coerce")
+            continue
+        mapped = genotype.map(COMMON_GT_DOSAGES)
+        unknown = mapped.isna() & genotype.notna() & ~genotype.isin((".", ".|.", "./."))
+        if unknown.any():
+            alternate, called = genotype_counts(genotype)
+            matrix[:, sample_index] = np.where(called > 0, alternate, np.nan)
+        else:
+            matrix[:, sample_index] = mapped.to_numpy(dtype=float, na_value=np.nan)
+    return matrix
+
+
+def dosage_table(sv: pd.DataFrame, samples: list[str]) -> pd.DataFrame:
+    """Convert genotype strings once and retain record metadata beside numeric dosages."""
+    return pd.concat(
+        [
+            sv[METADATA_COLUMNS].reset_index(drop=True),
+            pd.DataFrame(dosage_matrix_from_genotypes(sv, samples), columns=samples),
+        ],
+        axis=1,
+    )
+
+
+def binary_entropy_from_counts(carriers: np.ndarray, totals: np.ndarray) -> np.ndarray:
+    """Binary entropy for scalar or array carrier/total counts."""
+    carriers = np.asarray(carriers, dtype=float)
+    totals = np.asarray(totals, dtype=float)
+    probability = np.divide(
+        carriers, totals, out=np.zeros_like(carriers, dtype=float), where=totals > 0
+    )
+    complement = 1 - probability
+    result = np.zeros_like(probability, dtype=float)
+    positive = probability > 0
+    result[positive] -= probability[positive] * np.log2(probability[positive])
+    positive = complement > 0
+    result[positive] -= complement[positive] * np.log2(complement[positive])
+    return result
 
 
 def carrier_cluster_summary(assignments: pd.DataFrame) -> pd.DataFrame:
@@ -50,55 +96,70 @@ def carrier_cluster_summary(assignments: pd.DataFrame) -> pd.DataFrame:
     if assignments.empty:
         return pd.DataFrame(columns=output_columns)
 
-    rows = []
     keys = ["sv_record_id", "haploblock_id"]
-    for _, group in assignments.drop_duplicates([*keys, "cluster_id"]).groupby(keys, sort=False):
-        weights = pd.to_numeric(group["expected_alt_haplotypes"], errors="coerce").fillna(0.0)
-        total = float(weights.sum())
-        if total > 0:
-            shares = weights / total
-            top_index = shares.idxmax()
-            top_share = float(shares.loc[top_index])
-            effective_count = float(1.0 / np.square(shares).sum())
-        else:
-            top_index = group.index[0]
-            top_share = np.nan
-            effective_count = np.nan
-        standard = group[group["evidence_tier"].eq("standard")] if "evidence_tier" in group else group
-        standard_count = len(standard)
-        if standard_count:
-            standard_weights = pd.to_numeric(
-                standard["expected_alt_haplotypes"], errors="coerce"
-            ).fillna(0.0)
-            standard_total = float(standard_weights.sum())
-            if standard_total > 0:
-                standard_shares = standard_weights / standard_total
-                standard_top_index = standard_shares.idxmax()
-                standard_top_cluster = standard.loc[standard_top_index, "cluster_id"]
-                standard_top_share = float(standard_shares.loc[standard_top_index])
-                standard_effective_count = float(1.0 / np.square(standard_shares).sum())
-            else:
-                standard_top_cluster = standard.iloc[0]["cluster_id"]
-                standard_top_share = np.nan
-                standard_effective_count = np.nan
-        else:
-            standard_top_cluster = pd.NA
-            standard_top_share = np.nan
-            standard_effective_count = np.nan
-        first = group.iloc[0]
-        rows.append({
-            **{column: first[column] for column in METADATA_COLUMNS},
-            "haploblock_id": first["haploblock_id"],
-            "n_supported_carrier_clusters": len(group),
-            "n_standard_evidence_carrier_clusters": standard_count,
-            "top_supported_cluster_id": group.loc[top_index, "cluster_id"],
-            "top_cluster_carrier_evidence_share": top_share,
-            "effective_carrier_cluster_count": effective_count,
-            "top_standard_evidence_cluster_id": standard_top_cluster,
-            "top_standard_cluster_carrier_evidence_share": standard_top_share,
-            "effective_standard_carrier_cluster_count": standard_effective_count,
+    unique = assignments.drop_duplicates([*keys, "cluster_id"]).copy()
+    unique["_weight"] = pd.to_numeric(
+        unique["expected_alt_haplotypes"], errors="coerce"
+    ).fillna(0.0)
+    unique["_weight_squared"] = np.square(unique["_weight"])
+
+    def summarize(frame: pd.DataFrame, prefix: str) -> pd.DataFrame:
+        grouped = frame.groupby(keys, sort=False, observed=True)
+        totals = grouped.agg(
+            cluster_count=("cluster_id", "size"),
+            total_weight=("_weight", "sum"),
+            squared_weight_sum=("_weight_squared", "sum"),
+        ).reset_index()
+        top = (
+            frame.sort_values("_weight", ascending=False, kind="stable")
+            .drop_duplicates(keys)
+            [keys + ["cluster_id", "_weight"]]
+        )
+        result = totals.merge(top, on=keys, how="left")
+        positive = result["total_weight"] > 0
+        result[f"top_{prefix}_cluster_id"] = result["cluster_id"]
+        result[f"top_{prefix}_cluster_carrier_evidence_share"] = np.where(
+            positive, result["_weight"] / result["total_weight"], np.nan
+        )
+        result[f"effective_{prefix}_carrier_cluster_count"] = np.where(
+            positive,
+            np.square(result["total_weight"]) / result["squared_weight_sum"],
+            np.nan,
+        )
+        return result[
+            keys + [
+                "cluster_count", f"top_{prefix}_cluster_id",
+                f"top_{prefix}_cluster_carrier_evidence_share",
+                f"effective_{prefix}_carrier_cluster_count",
+            ]
+        ]
+
+    supported = summarize(unique, "supported").rename(columns={
+        "cluster_count": "n_supported_carrier_clusters",
+        "top_supported_cluster_carrier_evidence_share": "top_cluster_carrier_evidence_share",
+        "effective_supported_carrier_cluster_count": "effective_carrier_cluster_count",
+    })
+    standard = unique[unique["evidence_tier"].eq("standard")] if "evidence_tier" in unique else unique
+    if standard.empty:
+        standard_summary = pd.DataFrame(columns=keys + [
+            "n_standard_evidence_carrier_clusters", "top_standard_evidence_cluster_id",
+            "top_standard_cluster_carrier_evidence_share",
+            "effective_standard_carrier_cluster_count",
+        ])
+    else:
+        standard_summary = summarize(standard, "standard").rename(columns={
+            "cluster_count": "n_standard_evidence_carrier_clusters",
+            "top_standard_cluster_id": "top_standard_evidence_cluster_id",
         })
-    return pd.DataFrame(rows, columns=output_columns)
+
+    metadata = unique.drop_duplicates(keys)[METADATA_COLUMNS + ["haploblock_id"]]
+    result = metadata.merge(supported, on=keys, how="left").merge(
+        standard_summary, on=keys, how="left"
+    )
+    result["n_standard_evidence_carrier_clusters"] = (
+        result["n_standard_evidence_carrier_clusters"].fillna(0).astype(int)
+    )
+    return result[output_columns]
 
 
 def cluster_population_summary(
@@ -129,6 +190,7 @@ def cluster_purity_table(
     min_cluster_samples: int,
     min_carriers: int,
     min_noncarriers: int,
+    dosages: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Measure sample-level SV-carriage purity within each haplotype cluster."""
     output_columns = [
@@ -137,16 +199,17 @@ def cluster_purity_table(
         "carrier_rate_in_cluster", "cluster_purity", "mixed_balance",
         "meets_mixed_count_threshold",
     ]
-    dosages = sv[METADATA_COLUMNS].copy()
-    dosage_columns = {}
-    for sample in samples:
-        alternate, called = genotype_counts(sv[sample])
-        dosage_columns[sample] = np.where(called > 0, alternate, np.nan)
-    dosages = pd.concat([dosages, pd.DataFrame(dosage_columns)], axis=1)
-    dosages = dosages.set_index("sv_record_id", drop=False)
+    if dosages is None:
+        dosages = dosage_table(sv, samples)
+    record_positions = {
+        record_id: position
+        for position, record_id in enumerate(dosages["sv_record_id"])
+    }
+    sample_positions = {sample: position for position, sample in enumerate(samples)}
+    dosage_values = dosages[samples].to_numpy(dtype=float)
     memberships = memberships[memberships["sample_id"].astype(str).isin(samples)].copy()
     memberships["sample_id"] = memberships["sample_id"].astype(str)
-    rows = []
+    tables = []
 
     for block_id, block_variants in sv_blocks.drop_duplicates(
         ["sv_record_id", "haploblock_id"]
@@ -160,40 +223,52 @@ def cluster_purity_table(
         )
         record_ids = [
             record_id for record_id in block_variants["sv_record_id"]
-            if record_id in dosages.index
+            if record_id in record_positions
         ]
         if not record_ids:
             continue
-        block_dosages = dosages.loc[record_ids, cluster_dosage.index].to_numpy(dtype=float)
+        variant_positions = np.array(
+            [record_positions[record_id] for record_id in record_ids], dtype=int
+        )
+        block_sample_positions = np.array(
+            [sample_positions[sample] for sample in cluster_dosage.index], dtype=int
+        )
+        block_dosages = dosage_values[
+            np.ix_(variant_positions, block_sample_positions)
+        ]
         called = np.isfinite(block_dosages)
         carriers = called & (block_dosages > 0)
         cluster_present = cluster_dosage.to_numpy(dtype=bool)
-        called_counts = called.astype(int) @ cluster_present.astype(int)
-        carrier_counts = carriers.astype(int) @ cluster_present.astype(int)
-        for variant_index, record_id in enumerate(record_ids):
-            variant = dosages.loc[record_id]
-            for cluster_index, cluster_id in enumerate(cluster_dosage.columns):
-                n_called = int(called_counts[variant_index, cluster_index])
-                if n_called < min_cluster_samples:
-                    continue
-                n_carriers = int(carrier_counts[variant_index, cluster_index])
-                n_noncarriers = n_called - n_carriers
-                carrier_rate = n_carriers / n_called
-                rows.append({
-                    **{column: variant[column] for column in METADATA_COLUMNS},
-                    "haploblock_id": block_id,
-                    "cluster_id": cluster_id,
-                    "n_called_cluster_samples": n_called,
-                    "n_sv_carriers": n_carriers,
-                    "n_sv_noncarriers": n_noncarriers,
-                    "carrier_rate_in_cluster": carrier_rate,
-                    "cluster_purity": max(carrier_rate, 1 - carrier_rate),
-                    "mixed_balance": 2 * min(carrier_rate, 1 - carrier_rate),
-                    "meets_mixed_count_threshold": (
-                        n_carriers >= min_carriers and n_noncarriers >= min_noncarriers
-                    ),
-                })
-    return pd.DataFrame(rows, columns=output_columns)
+        called_counts = called.astype(np.int32) @ cluster_present.astype(np.int32)
+        carrier_counts = carriers.astype(np.int32) @ cluster_present.astype(np.int32)
+        variant_indices, cluster_indices = np.where(called_counts >= min_cluster_samples)
+        if not len(variant_indices):
+            continue
+
+        selected_called = called_counts[variant_indices, cluster_indices]
+        selected_carriers = carrier_counts[variant_indices, cluster_indices]
+        selected_noncarriers = selected_called - selected_carriers
+        carrier_rates = selected_carriers / selected_called
+        output = dosages.iloc[variant_positions[variant_indices]][METADATA_COLUMNS].reset_index(
+            drop=True
+        )
+        output["haploblock_id"] = block_id
+        output["cluster_id"] = cluster_dosage.columns.to_numpy()[cluster_indices]
+        output["n_called_cluster_samples"] = selected_called
+        output["n_sv_carriers"] = selected_carriers
+        output["n_sv_noncarriers"] = selected_noncarriers
+        output["carrier_rate_in_cluster"] = carrier_rates
+        output["cluster_purity"] = np.maximum(carrier_rates, 1 - carrier_rates)
+        output["mixed_balance"] = 2 * np.minimum(carrier_rates, 1 - carrier_rates)
+        output["meets_mixed_count_threshold"] = (
+            (selected_carriers >= min_carriers)
+            & (selected_noncarriers >= min_noncarriers)
+        )
+        tables.append(output)
+    return (
+        pd.concat(tables, ignore_index=True)[output_columns]
+        if tables else pd.DataFrame(columns=output_columns)
+    )
 
 
 def representation_summary(
@@ -368,73 +443,112 @@ def information_table(
     min_diplotype_samples: int,
     min_carriers: int = 1,
     min_noncarriers: int = 1,
+    dosages: pd.DataFrame | None = None,
+    include_information_gain: bool = True,
 ) -> pd.DataFrame:
     keys = ["sv_record_id"]
-    dosages = sv[METADATA_COLUMNS].copy()
-    dosage_columns = {}
-    for sample in samples:
-        alternate, called = genotype_counts(sv[sample])
-        dosage_columns[sample] = np.where(called > 0, alternate, np.nan)
-    dosages = pd.concat([dosages, pd.DataFrame(dosage_columns)], axis=1)
-    dosages = dosages.set_index(keys, drop=False)
+    if dosages is None:
+        dosages = dosage_table(sv, samples)
+    record_positions = {
+        record_id: position
+        for position, record_id in enumerate(dosages["sv_record_id"])
+    }
+    sample_positions = {sample: position for position, sample in enumerate(samples)}
+    dosage_values = dosages[samples].to_numpy(dtype=float)
     diplotypes = diplotype_table(memberships)
-    rows = []
+    tables = []
 
     for block_id, block_variants in sv_blocks.drop_duplicates(
         [*keys, "haploblock_id"]
     ).groupby("haploblock_id", sort=False):
         block_diplotypes = diplotypes[diplotypes["haploblock_id"] == block_id]
         diplotype_by_sample = block_diplotypes.set_index("sample_id")["diplotype"]
-        for _, block_variant in block_variants.iterrows():
-            key = block_variant["sv_record_id"]
-            if key not in dosages.index:
-                continue
-            variant = dosages.loc[key]
-            called_samples = [
-                sample for sample in samples
-                if sample in diplotype_by_sample.index and pd.notna(variant[sample])
-            ]
-            frame = pd.DataFrame({
-                "carrier": [int(variant[sample] > 0) for sample in called_samples],
-                "diplotype": [diplotype_by_sample[sample] for sample in called_samples],
-            })
-            counts = frame["diplotype"].value_counts()
-            eligible = counts[counts >= min_diplotype_samples].index
-            frame = frame[frame["diplotype"].isin(eligible)]
-            if frame.empty or frame["carrier"].nunique() < 2:
-                continue
-            baseline_entropy = entropy(frame["carrier"].to_numpy())
-            conditional_entropy = 0.0
-            mixed_samples = 0
-            mixed_groups = 0
-            mixed_groups_meeting_count_threshold = 0
-            for _, group in frame.groupby("diplotype"):
-                conditional_entropy += len(group) / len(frame) * entropy(group["carrier"].to_numpy())
-                if group["carrier"].nunique() > 1:
-                    mixed_groups += 1
-                    mixed_samples += len(group)
-                    n_carriers = int(group["carrier"].sum())
-                    n_noncarriers = len(group) - n_carriers
-                    if n_carriers >= min_carriers and n_noncarriers >= min_noncarriers:
-                        mixed_groups_meeting_count_threshold += 1
+        block_samples = [sample for sample in samples if sample in diplotype_by_sample.index]
+        record_ids = [
+            record_id for record_id in block_variants["sv_record_id"]
+            if record_id in record_positions
+        ]
+        if not block_samples or not record_ids:
+            continue
+
+        diplotype_codes, diplotype_labels = pd.factorize(
+            diplotype_by_sample.loc[block_samples], sort=True
+        )
+        indicator = np.eye(len(diplotype_labels), dtype=np.int8)[diplotype_codes]
+        variant_positions = np.array(
+            [record_positions[record_id] for record_id in record_ids], dtype=int
+        )
+        block_sample_positions = np.array(
+            [sample_positions[sample] for sample in block_samples], dtype=int
+        )
+        values = dosage_values[np.ix_(variant_positions, block_sample_positions)]
+        called = np.isfinite(values)
+        carriers = called & (values > 0)
+        called_counts = called.astype(np.int32) @ indicator
+        carrier_counts = carriers.astype(np.int32) @ indicator
+        eligible = called_counts >= min_diplotype_samples
+        eligible_counts = np.where(eligible, called_counts, 0)
+        eligible_carriers = np.where(eligible, carrier_counts, 0)
+        total_samples = eligible_counts.sum(axis=1)
+        total_carriers = eligible_carriers.sum(axis=1)
+        informative = (total_samples > 0) & (total_carriers > 0) & (
+            total_carriers < total_samples
+        )
+        if not informative.any():
+            continue
+
+        noncarrier_counts = called_counts - carrier_counts
+        mixed = eligible & (carrier_counts > 0) & (noncarrier_counts > 0)
+        mixed_count_threshold = (
+            eligible
+            & (carrier_counts >= min_carriers)
+            & (noncarrier_counts >= min_noncarriers)
+        )
+        n_eligible = eligible.sum(axis=1)
+        output = dosages.iloc[variant_positions][METADATA_COLUMNS].reset_index(drop=True)
+        output["haploblock_id"] = block_id
+        output["n_samples"] = total_samples
+        output["n_diplotypes"] = n_eligible
+        output["carrier_rate"] = np.divide(
+            total_carriers, total_samples, out=np.zeros_like(total_carriers, dtype=float),
+            where=total_samples > 0,
+        )
+        output["mixed_diplotype_fraction"] = np.divide(
+            mixed.sum(axis=1), n_eligible,
+            out=np.zeros_like(total_carriers, dtype=float), where=n_eligible > 0,
+        )
+        output["n_mixed_diplotypes_meeting_count_threshold"] = (
+            mixed_count_threshold.sum(axis=1)
+        )
+        output["samples_in_mixed_diplotypes"] = np.divide(
+            np.where(mixed, called_counts, 0).sum(axis=1), total_samples,
+            out=np.zeros_like(total_carriers, dtype=float), where=total_samples > 0,
+        )
+
+        if include_information_gain:
+            baseline_entropy = binary_entropy_from_counts(total_carriers, total_samples)
+            group_entropy = binary_entropy_from_counts(carrier_counts, called_counts)
+            conditional_entropy = np.divide(
+                np.where(eligible, called_counts * group_entropy, 0).sum(axis=1),
+                total_samples, out=np.zeros_like(total_carriers, dtype=float),
+                where=total_samples > 0,
+            )
             information_gain = baseline_entropy - conditional_entropy
-            rows.append({
-                **{column: variant[column] for column in METADATA_COLUMNS},
-                "haploblock_id": block_id,
-                "n_samples": len(frame),
-                "n_diplotypes": len(eligible),
-                "carrier_rate": float(frame["carrier"].mean()),
-                "carrier_entropy": baseline_entropy,
-                "conditional_entropy": conditional_entropy,
-                "information_gain_bits": information_gain,
-                "normalized_information_gain": information_gain / baseline_entropy,
-                "mixed_diplotype_fraction": mixed_groups / len(eligible),
-                "n_mixed_diplotypes_meeting_count_threshold": (
-                    mixed_groups_meeting_count_threshold
-                ),
-                "samples_in_mixed_diplotypes": mixed_samples / len(frame),
-            })
-    return pd.DataFrame(rows)
+            output["carrier_entropy"] = baseline_entropy
+            output["conditional_entropy"] = conditional_entropy
+            output["information_gain_bits"] = information_gain
+            output["normalized_information_gain"] = np.divide(
+                information_gain, baseline_entropy,
+                out=np.full_like(information_gain, np.nan), where=baseline_entropy > 0,
+            )
+        else:
+            for column in (
+                "carrier_entropy", "conditional_entropy", "information_gain_bits",
+                "normalized_information_gain",
+            ):
+                output[column] = np.nan
+        tables.append(output.loc[informative])
+    return pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
 
 
 def block_summary(information: pd.DataFrame) -> pd.DataFrame:
@@ -462,42 +576,53 @@ def pca_tables(
     min_call_rate: float,
     min_af: float,
     components: int,
+    dosage_matrix: np.ndarray | None = None,
+    samples: list[str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    samples = [sample for sample in metadata["sample_id"].astype(str) if sample in sv.columns]
-    dosage_matrix = np.empty((len(samples), len(sv)), dtype=float)
-    for sample_index, sample in enumerate(samples):
-        alternate, called = genotype_counts(sv[sample])
-        dosage_matrix[sample_index] = np.where(called > 0, alternate, np.nan)
-    columns = []
-    for variant_index in range(len(sv)):
-        values = dosage_matrix[:, variant_index].copy()
-        called = np.isfinite(values)
-        if called.mean() < min_call_rate:
-            continue
-        af = values[called].sum() / (2 * called.sum())
-        if min(af, 1 - af) < min_af:
-            continue
-        values[~called] = values[called].mean()
-        scale = np.sqrt(2 * af * (1 - af))
-        columns.append((values - 2 * af) / scale)
-    if not columns:
+    if dosage_matrix is None:
+        samples = [sample for sample in metadata["sample_id"].astype(str) if sample in sv.columns]
+        dosage_matrix = dosage_matrix_from_genotypes(sv, samples).T
+    elif samples is None:
+        raise ValueError("samples are required with a precomputed dosage matrix")
+
+    called = np.isfinite(dosage_matrix)
+    called_counts = called.sum(axis=0)
+    call_rates = called.mean(axis=0)
+    allele_frequencies = np.divide(
+        np.nansum(dosage_matrix, axis=0), 2 * called_counts,
+        out=np.zeros(dosage_matrix.shape[1], dtype=float), where=called_counts > 0,
+    )
+    keep = (
+        (call_rates >= min_call_rate)
+        & (np.minimum(allele_frequencies, 1 - allele_frequencies) >= min_af)
+    )
+    if not keep.any():
         return pd.DataFrame({"sample_id": samples}), pd.DataFrame(
             columns=["component", "explained_variance_ratio"]
         )
-    matrix = np.column_stack(columns)
-    u, singular_values, _ = np.linalg.svd(matrix, full_matrices=False)
-    n_components = min(components, len(singular_values))
-    coordinates = u[:, :n_components] * singular_values[:n_components]
+
+    matrix = dosage_matrix[:, keep].copy()
+    frequencies = allele_frequencies[keep]
+    matrix[~np.isfinite(matrix)] = np.broadcast_to(
+        2 * frequencies, matrix.shape
+    )[~np.isfinite(matrix)]
+    matrix = (matrix - 2 * frequencies) / np.sqrt(2 * frequencies * (1 - frequencies))
+    gram = matrix @ matrix.T
+    eigenvalues, eigenvectors = np.linalg.eigh(gram)
+    order = np.argsort(eigenvalues)[::-1]
+    eigenvalues = np.clip(eigenvalues[order], 0, None)
+    eigenvectors = eigenvectors[:, order]
+    n_components = min(components, len(eigenvalues))
+    coordinates = eigenvectors[:, :n_components] * np.sqrt(eigenvalues[:n_components])
     coordinate_table = pd.DataFrame(
         coordinates, columns=[f"PC{index + 1}" for index in range(n_components)]
     )
     coordinate_table.insert(0, "sample_id", samples)
     coordinate_table = coordinate_table.merge(metadata, on="sample_id", how="left")
-    variance = singular_values**2
     variance_table = pd.DataFrame({
         "component": [f"PC{index + 1}" for index in range(n_components)],
-        "explained_variance_ratio": variance[:n_components] / variance.sum(),
-        "n_variants": len(columns),
+        "explained_variance_ratio": eigenvalues[:n_components] / eigenvalues.sum(),
+        "n_variants": int(keep.sum()),
     })
     return coordinate_table, variance_table
 
@@ -527,6 +652,46 @@ def plot_pca(coordinates: pd.DataFrame, output: Path) -> None:
     plt.close(figure)
 
 
+def process_chromosome(
+    chrom: str,
+    genotype_path: str,
+    paths: dict,
+    config_dir: Path,
+    metadata: pd.DataFrame,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    """Read and analyze one chromosome using one shared dosage conversion."""
+    sv = pd.read_csv(resolve_path(genotype_path, config_dir), sep="\t")
+    sv_blocks = pd.read_csv(
+        resolve_path(paths["sv_block_summary"][chrom], config_dir), sep="\t"
+    )
+    memberships = pd.read_csv(
+        resolve_path(paths["cluster_memberships"][chrom], config_dir), sep="\t"
+    )
+    assignments = pd.read_csv(
+        resolve_path(paths["sv_to_clusters"][chrom], config_dir), sep="\t"
+    )
+    samples = [sample for sample in metadata["sample_id"].astype(str) if sample in sv.columns]
+    dosages = dosage_table(sv, samples)
+    information = information_table(
+        sv, sv_blocks, memberships, samples, args.min_diplotype_samples,
+        args.min_carriers, args.min_noncarriers, dosages,
+        include_information_gain=not args.skip_information_gain,
+    )
+    purity = cluster_purity_table(
+        sv, sv_blocks, memberships, samples, args.min_cluster_samples,
+        args.min_carriers, args.min_noncarriers, dosages,
+    )
+    return {
+        "information": information,
+        "carrier_clusters": carrier_cluster_summary(assignments),
+        "cluster_purity": purity,
+        "cluster_populations": cluster_population_summary(memberships, metadata),
+        "pca_samples": samples,
+        "pca_dosages": None if args.skip_pca else dosages[samples].to_numpy(dtype=float).T,
+    }
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
@@ -540,6 +705,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-call-rate", type=float, default=0.8)
     parser.add_argument("--min-af", type=float, default=0.01)
     parser.add_argument("--components", type=int, default=4)
+    parser.add_argument("--threads", type=int, default=8)
+    parser.add_argument("--skip-information-gain", action="store_true")
+    parser.add_argument("--skip-pca", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -553,36 +721,21 @@ def main(argv: list[str] | None = None) -> None:
         classifications = pd.read_csv(
             resolve_path(config["paths"]["sv_classification"], config_dir), sep="\t"
         )
-    all_sv = []
-    all_information = []
-    all_carrier_clusters = []
-    all_cluster_purity = []
-    all_cluster_populations = []
-    for chrom, genotype_path in config["paths"]["sv_genotypes"].items():
-        sv = pd.read_csv(resolve_path(genotype_path, config_dir), sep="\t")
-        sv_blocks = pd.read_csv(
-            resolve_path(config["paths"]["sv_block_summary"][chrom], config_dir), sep="\t"
+    chromosome_items = list(config["paths"]["sv_genotypes"].items())
+    def analyze(item: tuple[str, str]) -> dict[str, object]:
+        return process_chromosome(
+            item[0], item[1], config["paths"], config_dir, metadata, args
         )
-        memberships = pd.read_csv(
-            resolve_path(config["paths"]["cluster_memberships"][chrom], config_dir), sep="\t"
-        )
-        assignments = pd.read_csv(
-            resolve_path(config["paths"]["sv_to_clusters"][chrom], config_dir), sep="\t"
-        )
-        samples = [sample for sample in metadata["sample_id"].astype(str) if sample in sv.columns]
-        all_information.append(
-            information_table(
-                sv, sv_blocks, memberships, samples, args.min_diplotype_samples,
-                args.min_carriers, args.min_noncarriers,
-            )
-        )
-        all_carrier_clusters.append(carrier_cluster_summary(assignments))
-        all_cluster_purity.append(cluster_purity_table(
-            sv, sv_blocks, memberships, samples, args.min_cluster_samples,
-            args.min_carriers, args.min_noncarriers,
-        ))
-        all_cluster_populations.append(cluster_population_summary(memberships, metadata))
-        all_sv.append(sv)
+    if args.threads > 1 and len(chromosome_items) > 1:
+        with ThreadPoolExecutor(max_workers=args.threads) as executor:
+            chromosome_results = list(executor.map(analyze, chromosome_items))
+    else:
+        chromosome_results = [analyze(item) for item in chromosome_items]
+
+    all_information = [result["information"] for result in chromosome_results]
+    all_carrier_clusters = [result["carrier_clusters"] for result in chromosome_results]
+    all_cluster_purity = [result["cluster_purity"] for result in chromosome_results]
+    all_cluster_populations = [result["cluster_populations"] for result in chromosome_results]
     information = pd.concat(all_information, ignore_index=True)
     summary = block_summary(information)
     carrier_clusters = pd.concat(all_carrier_clusters, ignore_index=True)
@@ -594,10 +747,23 @@ def main(argv: list[str] | None = None) -> None:
         carrier_clusters, cluster_purity, information, args.purity_threshold,
         cluster_populations, classifications, args.min_cosmopolitan_populations,
     )
-    coordinates, variance = pca_tables(
-        pd.concat(all_sv, ignore_index=True), metadata,
-        args.min_call_rate, args.min_af, args.components,
-    )
+    if args.skip_pca:
+        coordinates = pd.DataFrame()
+        variance = pd.DataFrame()
+    else:
+        pca_samples = list(metadata["sample_id"].astype(str))
+        sample_index = {sample: index for index, sample in enumerate(pca_samples)}
+        aligned_matrices = []
+        for result in chromosome_results:
+            matrix = result["pca_dosages"]
+            aligned = np.full((len(pca_samples), matrix.shape[1]), np.nan)
+            rows = [sample_index[sample] for sample in result["pca_samples"]]
+            aligned[rows] = matrix
+            aligned_matrices.append(aligned)
+        coordinates, variance = pca_tables(
+            pd.DataFrame(), metadata, args.min_call_rate, args.min_af, args.components,
+            np.concatenate(aligned_matrices, axis=1), pca_samples,
+        )
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     paths = {
@@ -606,21 +772,28 @@ def main(argv: list[str] | None = None) -> None:
         "sv_carrier_cluster_summary": args.out_dir / "sv_carrier_cluster_summary.tsv",
         "sv_cluster_purity": args.out_dir / "sv_cluster_purity.tsv",
         "sv_hash_representation": args.out_dir / "sv_hash_representation.tsv",
-        "sv_pca_coordinates": args.out_dir / "sv_pca_coordinates.tsv",
-        "sv_pca_variance": args.out_dir / "sv_pca_variance.tsv",
-        "sv_pca_plot": args.out_dir / "sv_pca.png",
     }
+    if not args.skip_pca:
+        paths.update({
+            "sv_pca_coordinates": args.out_dir / "sv_pca_coordinates.tsv",
+            "sv_pca_variance": args.out_dir / "sv_pca_variance.tsv",
+            "sv_pca_plot": args.out_dir / "sv_pca.png",
+        })
     information.to_csv(paths["sv_haploblock_information"], sep="\t", index=False)
     summary.to_csv(paths["haploblock_information_summary"], sep="\t", index=False)
     carrier_clusters.to_csv(paths["sv_carrier_cluster_summary"], sep="\t", index=False)
     cluster_purity.to_csv(paths["sv_cluster_purity"], sep="\t", index=False)
     hash_representation.to_csv(paths["sv_hash_representation"], sep="\t", index=False)
-    coordinates.to_csv(paths["sv_pca_coordinates"], sep="\t", index=False)
-    variance.to_csv(paths["sv_pca_variance"], sep="\t", index=False)
-    plot_pca(coordinates, paths["sv_pca_plot"])
+    if not args.skip_pca:
+        coordinates.to_csv(paths["sv_pca_coordinates"], sep="\t", index=False)
+        variance.to_csv(paths["sv_pca_variance"], sep="\t", index=False)
+        plot_pca(coordinates, paths["sv_pca_plot"])
 
     output_config = dict(config)
     output_config["paths"] = dict(config["paths"])
+    if args.skip_pca:
+        for key in ("sv_pca_coordinates", "sv_pca_variance", "sv_pca_plot"):
+            output_config["paths"].pop(key, None)
     output_config["paths"].update({key: str(path.resolve()) for key, path in paths.items()})
     (args.out_dir / "config.yaml").write_text(yaml.safe_dump(output_config, sort_keys=False))
 

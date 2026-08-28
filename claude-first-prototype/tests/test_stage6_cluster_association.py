@@ -58,6 +58,12 @@ def test_within_population_test_separates_portable_from_ancestry_signal() -> Non
         sv, sv_blocks, pd.DataFrame(memberships), metadata,
         permutations=199, seed=4, min_cluster_haplotypes=4, min_population_samples=4,
     )
+    parallel_result = stage6_cluster_association.association_table(
+        sv, sv_blocks, pd.DataFrame(memberships), metadata,
+        permutations=199, seed=4, min_cluster_haplotypes=4, min_population_samples=4,
+        threads=2,
+    )
+    pd.testing.assert_frame_equal(result, parallel_result)
     summary = stage6_cluster_association.summarize_associations(
         result, q_threshold=0.05, min_abs_r=0.3
     )

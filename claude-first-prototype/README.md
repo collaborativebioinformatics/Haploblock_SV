@@ -286,8 +286,18 @@ low-evidence assignments cannot create definitive multi-cluster or shared-backgr
 
 ```bash
 python claude-first-prototype/pipeline/stage7_information_gain.py \
-  --config claude-first-prototype/stage6_output/config.yaml
+  --config claude-first-prototype/stage6_output/config.yaml \
+  --threads 4
 ```
+
+Stage 7 parses each chromosome's genotype table once and shares the resulting dosage matrix across
+the representation audit and PCA. The diplotype summaries use block-level matrix operations, and
+PCA uses an exact sample-by-sample eigendecomposition rather than decomposing the much wider
+sample-by-SV matrix. `--threads N` processes independent chromosomes concurrently; choose a
+modest value because each worker retains one chromosome dosage matrix in memory. For quick runs,
+`--skip-information-gain` omits the secondary entropy calculation while preserving the direct
+carrier-concentration and within-cluster subdivision results, and `--skip-pca` omits the structure
+QC tables and plot entirely.
 
 The primary outputs are `sv_carrier_cluster_summary.tsv`, `sv_cluster_purity.tsv`, and
 `sv_hash_representation.tsv`. The existing `sv_haploblock_information.tsv` is retained as a secondary

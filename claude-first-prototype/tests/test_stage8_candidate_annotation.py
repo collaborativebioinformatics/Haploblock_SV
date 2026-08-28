@@ -36,7 +36,10 @@ def test_sv_types_receive_distinct_gene_consequences() -> None:
         {**common, "sv_id": "inv_span", "start": 250, "end": 400, "sv_type": "INV"},
     ])
 
-    result = stage8_candidate_annotation.annotate_candidates(candidates, features).set_index("sv_id")
+    serial_result = stage8_candidate_annotation.annotate_candidates(candidates, features)
+    parallel_result = stage8_candidate_annotation.annotate_candidates(candidates, features, threads=2)
+    pd.testing.assert_frame_equal(serial_result, parallel_result)
+    result = serial_result.set_index("sv_id")
     assert result.loc["del", "consequence"] == "exonic_deletion"
     assert result.loc["del_exon", "consequence"] == "complete_exon_loss"
     assert result.loc["ins", "consequence"] == "exonic_insertion"

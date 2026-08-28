@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -139,6 +140,115 @@ def assign_pair_q_values(associations: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def association_rows_for_block(
+    block_id: str,
+    block_variants: pd.DataFrame,
+    memberships: pd.DataFrame,
+    dosages: pd.DataFrame,
+    samples: list[str],
+    population_by_sample: dict[str, str],
+    permutations: int,
+    seed: int,
+    min_cluster_haplotypes: int,
+    min_population_samples: int,
+    refinement_permutations: int | None,
+    refinement_p_threshold: float,
+) -> list[dict]:
+    """Test all SVs in one haploblock with an independent random stream."""
+    block_memberships = memberships[memberships["haploblock_id"] == block_id]
+    if block_memberships.empty:
+        return []
+    cluster_dosage = (
+        block_memberships.assign(cluster_haplotypes=1)
+        .pivot_table(
+            index="sample_id", columns="cluster_id", values="cluster_haplotypes",
+            aggfunc="sum", fill_value=0,
+        )
+    )
+    rng = np.random.default_rng(seed)
+    rows = []
+    for _, block_variant in block_variants.iterrows():
+        key = block_variant["sv_record_id"]
+        if key not in dosages.index:
+            continue
+        variant = dosages.loc[key]
+        called_samples = [
+            sample for sample in cluster_dosage.index
+            if sample in samples and pd.notna(variant[sample])
+        ]
+        if len(called_samples) < 4:
+            continue
+        y = variant[called_samples].to_numpy(dtype=float)
+        populations = np.array([population_by_sample[sample] for sample in called_samples])
+        if len(np.unique(y)) < 2:
+            continue
+        cluster_vectors = {}
+        for cluster_id in cluster_dosage.columns:
+            if int(cluster_dosage[cluster_id].sum()) < min_cluster_haplotypes:
+                continue
+            x = cluster_dosage.loc[called_samples, cluster_id].to_numpy(dtype=float)
+            if len(np.unique(x)) < 2:
+                continue
+            cluster_vectors[cluster_id] = x
+        observed = {
+            cluster_id: correlation(x, y, populations)
+            for cluster_id, x in cluster_vectors.items()
+        }
+        if not observed:
+            continue
+        p_values, permutations_used = max_statistic_p_values(
+            cluster_vectors, y, populations, observed, permutations, rng
+        )
+        if (
+            refinement_permutations is not None
+            and refinement_permutations > permutations
+            and min(p_values.values()) <= refinement_p_threshold
+        ):
+            p_values, permutations_used = max_statistic_p_values(
+                cluster_vectors, y, populations, observed,
+                refinement_permutations, rng,
+            )
+        for cluster_id, x in cluster_vectors.items():
+            adjusted_r = observed[cluster_id]
+            informative, consistency = population_consistency(
+                x, y, populations, adjusted_r, min_population_samples
+            )
+            with_cluster = y[x > 0] > 0
+            without_cluster = y[x == 0] > 0
+            rate_with = float(with_cluster.mean())
+            rate_without = float(without_cluster.mean())
+            rate_difference = rate_with - rate_without
+            if rate_difference > 0:
+                direction = "carrier_enriched"
+            elif rate_difference < 0:
+                direction = "carrier_depleted"
+            else:
+                direction = "no_difference"
+            rows.append(
+                {
+                    **{column: variant[column] for column in METADATA_COLUMNS},
+                    "haploblock_id": block_id,
+                    "cluster_id": cluster_id,
+                    "n_called": len(called_samples),
+                    "n_cluster_carriers": int((x > 0).sum()),
+                    "n_samples_with_cluster": int((x > 0).sum()),
+                    "n_sv_carriers_with_cluster": int(with_cluster.sum()),
+                    "n_sv_noncarriers_with_cluster": int((~with_cluster).sum()),
+                    "cluster_haplotype_count": int(x.sum()),
+                    "carrier_rate_with_cluster": rate_with,
+                    "carrier_rate_without_cluster": rate_without,
+                    "carrier_rate_difference": rate_difference,
+                    "association_direction": direction,
+                    "population_adjusted_r": adjusted_r,
+                    "p_value": p_values[cluster_id],
+                    "permutations_used": permutations_used,
+                    "informative_populations": informative,
+                    "directional_consistency": consistency,
+                }
+            )
+    return rows
+
+
 def association_table(
     sv: pd.DataFrame,
     sv_blocks: pd.DataFrame,
@@ -150,6 +260,7 @@ def association_table(
     min_population_samples: int,
     refinement_permutations: int | None = None,
     refinement_p_threshold: float = 0.01,
+    threads: int = 1,
 ) -> pd.DataFrame:
     samples = [
         sample for sample in metadata["sample_id"].astype(str)
@@ -160,105 +271,23 @@ def association_table(
     dosages = dosage_table(sv, samples).set_index(variant_key, drop=False)
     memberships = memberships[memberships["sample_id"].astype(str).isin(samples)].copy()
     memberships["sample_id"] = memberships["sample_id"].astype(str)
-    rng = np.random.default_rng(seed)
-    rows = []
-
-    for block_id, block_variants in sv_blocks.drop_duplicates(
+    block_groups = list(sv_blocks.drop_duplicates(
         [*variant_key, "haploblock_id"]
-    ).groupby("haploblock_id", sort=False):
-        block_memberships = memberships[memberships["haploblock_id"] == block_id]
-        if block_memberships.empty:
-            continue
-        cluster_dosage = (
-            block_memberships.assign(cluster_haplotypes=1)
-            .pivot_table(
-                index="sample_id", columns="cluster_id", values="cluster_haplotypes",
-                aggfunc="sum", fill_value=0,
-            )
+    ).groupby("haploblock_id", sort=False))
+    if not block_groups:
+        return pd.DataFrame(columns=ASSOCIATION_COLUMNS)
+
+    def test_block(index_and_group: tuple[int, tuple[str, pd.DataFrame]]) -> list[dict]:
+        index, (block_id, block_variants) = index_and_group
+        return association_rows_for_block(
+            block_id, block_variants, memberships, dosages, samples, population_by_sample,
+            permutations, seed + index, min_cluster_haplotypes, min_population_samples,
+            refinement_permutations, refinement_p_threshold,
         )
-        for _, block_variant in block_variants.iterrows():
-            key = block_variant["sv_record_id"]
-            if key not in dosages.index:
-                continue
-            variant = dosages.loc[key]
-            called_samples = [
-                sample for sample in cluster_dosage.index
-                if sample in samples and pd.notna(variant[sample])
-            ]
-            if len(called_samples) < 4:
-                continue
-            y = variant[called_samples].to_numpy(dtype=float)
-            populations = np.array([population_by_sample[sample] for sample in called_samples])
-            if len(np.unique(y)) < 2:
-                continue
-            cluster_vectors = {}
-            for cluster_id in cluster_dosage.columns:
-                if int(cluster_dosage[cluster_id].sum()) < min_cluster_haplotypes:
-                    continue
-                x = cluster_dosage.loc[called_samples, cluster_id].to_numpy(dtype=float)
-                if len(np.unique(x)) < 2:
-                    continue
-                cluster_vectors[cluster_id] = x
-            observed = {
-                cluster_id: correlation(x, y, populations)
-                for cluster_id, x in cluster_vectors.items()
-            }
-            if not observed:
-                continue
-            p_values, permutations_used = max_statistic_p_values(
-                cluster_vectors, y, populations, observed, permutations, rng
-            )
-            if (
-                refinement_permutations is not None
-                and refinement_permutations > permutations
-                and min(p_values.values()) <= refinement_p_threshold
-            ):
-                # The refinement draws are independent and replace, rather than
-                # reuse, the screening p-value selected in the first pass.
-                p_values, permutations_used = max_statistic_p_values(
-                    cluster_vectors, y, populations, observed,
-                    refinement_permutations, rng,
-                )
-            for cluster_id, x in cluster_vectors.items():
-                adjusted_r = observed[cluster_id]
-                informative, consistency = population_consistency(
-                    x, y, populations, adjusted_r, min_population_samples
-                )
-                with_cluster = y[x > 0] > 0
-                without_cluster = y[x == 0] > 0
-                rate_with = float(with_cluster.mean())
-                rate_without = float(without_cluster.mean())
-                rate_difference = rate_with - rate_without
-                if rate_difference > 0:
-                    direction = "carrier_enriched"
-                elif rate_difference < 0:
-                    direction = "carrier_depleted"
-                else:
-                    direction = "no_difference"
-                rows.append(
-                    {
-                        **{column: variant[column] for column in METADATA_COLUMNS},
-                        "haploblock_id": block_id,
-                        "cluster_id": cluster_id,
-                        "n_called": len(called_samples),
-                        # Retained for compatibility; this historically counted called
-                        # samples carrying the cluster, not SV carriers.
-                        "n_cluster_carriers": int((x > 0).sum()),
-                        "n_samples_with_cluster": int((x > 0).sum()),
-                        "n_sv_carriers_with_cluster": int(with_cluster.sum()),
-                        "n_sv_noncarriers_with_cluster": int((~with_cluster).sum()),
-                        "cluster_haplotype_count": int(x.sum()),
-                        "carrier_rate_with_cluster": rate_with,
-                        "carrier_rate_without_cluster": rate_without,
-                        "carrier_rate_difference": rate_difference,
-                        "association_direction": direction,
-                        "population_adjusted_r": adjusted_r,
-                        "p_value": p_values[cluster_id],
-                        "permutations_used": permutations_used,
-                        "informative_populations": informative,
-                        "directional_consistency": consistency,
-                    }
-                )
+
+    with ThreadPoolExecutor(max_workers=min(threads, len(block_groups))) as executor:
+        block_rows = list(executor.map(test_block, enumerate(block_groups)))
+    rows = [row for rows_for_block in block_rows for row in rows_for_block]
 
     if not rows:
         return pd.DataFrame(columns=ASSOCIATION_COLUMNS)
@@ -335,6 +364,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--refinement-p-threshold", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=13)
+    parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--min-cluster-haplotypes", type=int, default=6)
     parser.add_argument("--min-population-samples", type=int, default=4)
     parser.add_argument("--q-threshold", type=float, default=0.05)
@@ -360,7 +390,7 @@ def main(argv: list[str] | None = None) -> None:
             association_table(
                 sv, sv_blocks, memberships, metadata, args.permutations, args.seed,
                 args.min_cluster_haplotypes, args.min_population_samples,
-                args.refinement_permutations, args.refinement_p_threshold,
+                args.refinement_permutations, args.refinement_p_threshold, args.threads,
             )
         )
     associations = pd.concat(all_associations, ignore_index=True)
