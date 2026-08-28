@@ -128,9 +128,9 @@ The population-specific variants are distributed across many subpopulations and 
 ![Stage 4 haploblock SV classification](figures/population_specific_by_haploblock.png)
 Figure 2-stage4: Top 30 haplablocks ranked by the number of unique structural variants (SVs) observed exclusively within each subpopulation. Each unique SV is counted once per subpopulation, provided that at least two samples carry the SV.
 
-Stage 5 (In Progress)
+Stage 5 (Review of data in progress)
 
-Stage 6 (In Progress still reviewing and verifying data)
+Stage 6 (Review of data in progress)
 
 
 # Future steps
