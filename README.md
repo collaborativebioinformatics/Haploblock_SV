@@ -118,10 +118,9 @@ Figure 1-stage4: The figure illustrates the distribution of structural variant (
 ![Stage 4 haploblock SV classification](figures/population_specific_by_haploblock.png)
 Figure 2-stage4: Top 30 haplablocks ranked by the number of unique structural variants (SVs) observed exclusively within each subpopulation. Each unique SV is counted once per subpopulation, provided that at least two samples carry the SV.
 
+Stage 5 (In Progress)
+
 Stage 6 (In Progress still reviewing and verifying data)
-
-Given only the current sample size in chromosome 21 and analysis filters, the results do not provide evidence the predefined SNV-derived clusters consistently explain population-specific SV carriage after subpopulation adjustment. 
-
 
 
 # Future steps
