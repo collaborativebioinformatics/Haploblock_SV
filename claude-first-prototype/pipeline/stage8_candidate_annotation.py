@@ -223,15 +223,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gtf", type=Path, default=None)
     parser.add_argument("--out-dir", type=Path, default=Path("stage8_output"))
     parser.add_argument("--threads", type=int, default=8)
-    parser.add_argument(
-        "--stage5-config", type=Path, default=None,
-        help="After Stage 8 succeeds, run Stage 9 using this Stage 5 branch config.",
-    )
-    parser.add_argument("--report-out-dir", type=Path, default=Path("stage9_output"))
-    parser.add_argument(
-        "--report-agent", choices=("auto", "required", "off"), default="auto"
-    )
-    parser.add_argument("--report-model", default="gpt-5.6")
     return parser.parse_args(argv)
 
 
@@ -263,18 +254,7 @@ def main(argv: list[str] | None = None) -> None:
     output_config = dict(config)
     output_config["paths"] = dict(config["paths"])
     output_config["paths"]["annotated_sv_candidates"] = str(output_path.resolve())
-    output_config_path = args.out_dir / "config.yaml"
-    output_config_path.write_text(yaml.safe_dump(output_config, sort_keys=False))
-
-    if args.stage5_config is not None:
-        import stage9_report
-
-        stage9_report.run_report(
-            [args.stage5_config, output_config_path],
-            args.report_out_dir,
-            args.report_agent,
-            args.report_model,
-        )
+    (args.out_dir / "config.yaml").write_text(yaml.safe_dump(output_config, sort_keys=False))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# Stage 9 report rendering and agent interpretation
+mistune
+openai

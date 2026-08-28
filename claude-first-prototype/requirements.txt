@@ -12,9 +12,3 @@ scipy
 
 # Stage 7 population-structure QC plot
 matplotlib
-
-# Stage 9 report rendering
-mistune
-
-# Optional Stage 9 agent interpretation
-openai
