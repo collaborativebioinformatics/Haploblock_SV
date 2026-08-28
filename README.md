@@ -110,7 +110,7 @@ The purpose of Stage 2 is to classify SVs based on their positional relationship
 
 These results provide a quantification on how SVs are distributed relative to haploblock regions. In addition to their positional classification, 17,222 SVs were classified as near boundary, indication that they occur close to a haploblock boundary, whereas 65,927 Svs were classified as not near boundary. 
 
-The purpose of Stage 4 is to classify each structural variant (SV) according to its allele frequency (AF) distribution across population subgroups within the cohort and to associate these classifications with haploblocks as sown in Table 1. 
+The purpose of Stage 4 is to classify each structural variant (SV) according to its allele frequency (AF) distribution across population subgroups within the cohort and to associate these classifications with haploblocks as shown in Table 1. 
 
 Table 1. Chromosome 21 classification based on the cohor population AF
 | Position class | Count | Definiton| 
