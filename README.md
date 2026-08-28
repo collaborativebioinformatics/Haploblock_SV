@@ -1,6 +1,14 @@
 > Structural Variants Hackathon at Baylor College of Medicine, August 25-28, 2026
 
-# Haploblock_SV
+# 
+<h1 align="center">Haploblock SV</h1>
+
+<p align="center">
+  <img width="400" height="400" src="haploblocks_logo.png">
+ 
+  <h3 align="center">A pipeline for implicit analysis of structural variants within haploblocks.</h3>
+</p>
+
 
 # Quickstart
 Install dependencies:
@@ -90,10 +98,45 @@ The pipeline is currently under active development
 
 
 # Results
+The current prototype uses 1kgp_ont_cohort.postfilter.full.vcf.gz , a previously merged structural variant callset derived from the 1000 Genome Project Oxford Nanopore Technologies (ONT) cohort, comprising a total of 402 samples. For this initial demonstration, we focused on chromosome 21 to confirm successful integration of the pipeline, and assess the overall analytical results. 
+
+The purpose of Stage 2 is to classify SVs based on their positional relationship to haploblock regions. For this demonstration, the input VCF contained 83,159 unique SV records, which were categorized into three classes
+
+| Position class | Count | Definition |
+|---|---|---|
+|within block|60,367|The SV overlaps exactly one haploblock.|
+|outside block|22,760|The SV overlaps exactly no haploblock.|
+|boundary crossing|22|The SV overlaps two or more haploblocks.|
+
+These results provide a quantification on how SVs are distributed relative to haploblock regions. In addition to their positional classification, 17,222 SVs were classified as near boundary, indication that they occur close to a haploblock boundary, whereas 65,927 Svs were classified as not near boundary. 
+
+The purpose of Stage 4 is to classify each structural variant (SV) according to its allele frequency (AF) distribution across population subgroups within the cohort and to associate these classifications with haploblocks as shown in Table 1. 
+
+Table 1. Chromosome 21 classification based on the cohor population AF
+| Position class | Count | Definiton| 
+|---|---|---|
+|common|5,224|AF meets the presence threshold in at least two subpopulations|
+|population_specific|1,657|AF meets it in exactly one population and is below the absence threshold in all other populations with data.|
+|other|76,268|Insufficient data, rare/absent, or an intermediate pattern not captured by the two classes..|
+
+
+![Stage 4 haploblock SV classification](figures/haploblock_sv_classification.png)
+Figure 1-stage4: The figure illustrates the distribution of structural variant (SV) composition across haploblocks on chromosome 21, based on allele frequencies observed in the study cohort. 
+
+The population-specific variants are distributed across many subpopulations and haploblocks with the largest counts associated with PEL, YRI, PJL, LWK and ACB.
+
+![Stage 4 haploblock SV classification](figures/population_specific_by_haploblock.png)
+Figure 2-stage4: Top 30 haplablocks ranked by the number of unique structural variants (SVs) observed exclusively within each subpopulation. Each unique SV is counted once per subpopulation, provided that at least two samples carry the SV.
+
+Stage 5 (Review of data in progress)
+
+Stage 6 (Review of data in progress)
+
 
 # Future steps
 
-- Create region-level FASTA files containing SNPs and SVs, reclusters the haploblocks using MMseqs2, and verify that the resulting clusters match the original ones. 
+- Add informative plots to all the stages
+- Verify all stages results and modify them as need it.  
 
 
 # References

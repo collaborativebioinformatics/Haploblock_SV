@@ -94,8 +94,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--chroms", default="all", help="Comma-separated chromosomes or 'all' for chr1-22,X")
     parser.add_argument("--cluster-base-url", default="https://data.haploblocks.org/haploblock_hashes/1000G")
     parser.add_argument("--cluster-root", type=Path, default=None, help="Use local <root>/<chrom> cluster files")
-    parser.add_argument("--chrom-workers", type=int, default=4)
-    parser.add_argument("--download-workers", type=int, default=4)
+    parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--max-sv-id-length", type=int, default=80)
     parser.add_argument("--association-threshold", type=float, default=0.75)
@@ -134,8 +133,7 @@ def main(argv: list[str] | None = None) -> None:
             cluster_base_url=args.cluster_base_url,
             cluster_root=args.cluster_root,
             out_dir=args.out_dir,
-            chrom_workers=args.chrom_workers,
-            download_workers=args.download_workers,
+            threads=args.threads,
             retries=args.retries,
             max_sv_id_length=args.max_sv_id_length,
             association_threshold=args.association_threshold,

@@ -2,6 +2,7 @@
 
 import csv
 import gzip
+import json
 import sys
 from pathlib import Path
 
@@ -59,8 +60,7 @@ def test_stage1_publishes_downstream_contract(tmp_path: Path) -> None:
             "--gtf", str(tmp_path / "genes.gtf"),
             "--cluster-root", str(tmp_path / "clusters"),
             "--chroms", "chr1",
-            "--chrom-workers", "1",
-            "--download-workers", "1",
+            "--threads", "1",
             "--out-dir", str(out_dir),
         ]
     )
@@ -180,3 +180,176 @@ def test_legacy_cleanup_keeps_published_contracts(tmp_path: Path) -> None:
 
     assert membership_path.read_text() == "published\n"
     assert not legacy_path.exists()
+
+
+def test_downloaded_cluster_files_are_reused(tmp_path: Path, monkeypatch) -> None:
+    names = ["chr1_0-100_cluster.tsv", "chr1_100-200_cluster.tsv"]
+    downloads = []
+    monkeypatch.setattr(
+        match_svs_to_clusters,
+        "discover_cluster_filenames",
+        lambda base_url, chrom, retries: names,
+    )
+
+    def download(url: str, retries: int) -> bytes:
+        downloads.append(url)
+        return b"cluster_a\tsample_chr1_region_0-100_hap0\n"
+
+    monkeypatch.setattr(match_svs_to_clusters, "request_with_retries", download)
+    cache_dir = match_svs_to_clusters.cluster_cache_directory(
+        tmp_path, "https://example.test/source", "chr1"
+    )
+    assert cache_dir == match_svs_to_clusters.cluster_cache_directory(
+        tmp_path, "https://example.test/source/", "chr1"
+    )
+    assert cache_dir != match_svs_to_clusters.cluster_cache_directory(
+        tmp_path, "https://other.example.test/source", "chr1"
+    )
+    first_paths, first_qc = match_svs_to_clusters.prepare_cluster_files(
+        "chr1", "https://example.test", cache_dir, None, 2, 1
+    )
+    second_paths, second_qc = match_svs_to_clusters.prepare_cluster_files(
+        "chr1", "https://example.test", cache_dir, None, 2, 1
+    )
+
+    assert first_paths == second_paths
+    assert len(downloads) == 2
+    assert first_qc["downloaded"] == 2
+    assert second_qc["downloaded"] == 0
+    assert second_qc["reused"] == 2
+
+
+def test_parallel_block_evaluation_preserves_outputs(tmp_path: Path) -> None:
+    vcf_path = tmp_path / "cohort.vcf.gz"
+    write_test_vcf(vcf_path)
+    cluster_dir = tmp_path / "clusters" / "chr1"
+    cluster_dir.mkdir(parents=True)
+    membership = (
+        "cluster_a\tGM00001_chr1_region_{start}-{end}_hap0\n"
+        "cluster_b\tGM00001_chr1_region_{start}-{end}_hap1\n"
+        "cluster_a\tSAMPLE2_chr1_region_{start}-{end}_hap0\n"
+        "cluster_b\tSAMPLE2_chr1_region_{start}-{end}_hap1\n"
+    )
+    for start, end in [(0, 1000), (50, 500)]:
+        (cluster_dir / f"chr1_{start}-{end}_cluster.tsv").write_text(
+            membership.format(start=start, end=end)
+        )
+
+    output_dirs = []
+    for threads in [1, 2]:
+        out_dir = tmp_path / f"output_{threads}"
+        args = match_svs_to_clusters.parse_args(
+            [
+                "--vcf", str(vcf_path),
+                "--chroms", "chr1",
+                "--cluster-root", str(tmp_path / "clusters"),
+                "--out-dir", str(out_dir),
+                "--threads", str(threads),
+            ]
+        )
+        match_svs_to_clusters.run(args)
+        output_dirs.append(out_dir)
+
+    for name in [
+        "sv_genotypes.chr1.tsv",
+        "haploblocks.chr1.tsv",
+        "cluster_memberships.chr1.tsv",
+        "sv_block_summary.chr1.tsv",
+        "sv_to_clusters.chr1.tsv",
+    ]:
+        assert (output_dirs[0] / name).read_text() == (output_dirs[1] / name).read_text()
+
+    qc_fields = [
+        "sv_block_pairs",
+        "converged_models",
+        "nonconverged_models",
+        "cluster_evaluations",
+        "associated_cluster_rows",
+        "cluster_probability_bins",
+        "cluster_call_rate_bins",
+        "heterozygote_assignment_status_counts",
+        "heterozygote_assignment_confidence_bins",
+        "association_class_counts",
+    ]
+    qcs = [
+        json.loads((out_dir / "debug_and_qc" / "method_qc.chr1.json").read_text())
+        for out_dir in output_dirs
+    ]
+    assert {field: qcs[0][field] for field in qc_fields} == {
+        field: qcs[1][field] for field in qc_fields
+    }
+
+
+def test_single_worker_processes_every_requested_chromosome(tmp_path: Path, monkeypatch) -> None:
+    out_dir = tmp_path / "output"
+    (out_dir / "debug_and_qc").mkdir(parents=True)
+    vcf_path = tmp_path / "cohort.vcf.gz"
+    processed = []
+    monkeypatch.setattr(match_svs_to_clusters, "chromosome_is_complete", lambda *args: False)
+    monkeypatch.setattr(
+        match_svs_to_clusters,
+        "reusable_sv_tables",
+        lambda vcf, chroms, output, max_length: {
+            chrom: tmp_path / f"{chrom}.tsv" for chrom in chroms
+        },
+    )
+    monkeypatch.setattr(
+        match_svs_to_clusters,
+        "process_chromosome",
+        lambda chrom, *args: processed.append(chrom),
+    )
+    args = match_svs_to_clusters.parse_args(
+        [
+            "--vcf", str(vcf_path),
+            "--chroms", "chr1,chr2",
+            "--out-dir", str(out_dir),
+            "--threads", "1",
+        ]
+    )
+
+    match_svs_to_clusters.run(args)
+
+    assert processed == ["chr1", "chr2"]
+
+
+def test_completed_chromosome_must_match_cluster_source(tmp_path: Path) -> None:
+    out_dir = tmp_path / "output"
+    qc_dir = out_dir / "debug_and_qc"
+    qc_dir.mkdir(parents=True)
+    vcf_path = tmp_path / "cohort.vcf.gz"
+    vcf_path.touch()
+    for path in [
+        out_dir / "samples.tsv",
+        out_dir / "sv_genotypes.chr1.tsv",
+        out_dir / "sv_to_clusters.chr1.tsv",
+        out_dir / "haploblocks.chr1.tsv",
+        out_dir / "cluster_memberships.chr1.tsv",
+        out_dir / "sv_block_summary.chr1.tsv",
+    ]:
+        path.touch()
+    (qc_dir / "vcf_qc.chr1.json").write_text(
+        json.dumps({"vcf": str(vcf_path.resolve()), "sv_id_max_length": 80})
+    )
+    (qc_dir / "method_qc.chr1.json").write_text(
+        json.dumps(
+            {
+                "cluster_download": {
+                    "source": "download",
+                    "base_url": "https://source-a.example.test",
+                },
+                "association_threshold": 0.75,
+                "posterior_assignment_threshold": 0.75,
+                "max_iterations": 25,
+                "tolerance": 1e-5,
+            }
+        )
+    )
+    common = ("chr1", vcf_path, out_dir)
+    settings = (80, 0.75, 0.75, 25, 1e-5)
+
+    assert match_svs_to_clusters.chromosome_is_complete(
+        *common, "https://source-a.example.test/", None, *settings
+    )
+    assert not match_svs_to_clusters.chromosome_is_complete(
+        *common, "https://source-b.example.test", None, *settings
+    )

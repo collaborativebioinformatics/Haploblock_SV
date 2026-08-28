@@ -30,7 +30,11 @@ def test_stage5_uses_unique_sv_block_pairs_and_flags_spike(tmp_path: Path) -> No
                         "sv_record_id": f"record{len(rows)}",
                         "sv_id": f"sv{len(rows)}",
                     "haploblock_id": block,
+                    "chrom": "chr1",
                     "sv_type": sv_type,
+                    "start": len(rows) * 100,
+                    "end": len(rows) * 100 + 1,
+                    "length": 100,
                 }
             )
 
@@ -86,6 +90,30 @@ def test_stage5_uses_unique_sv_block_pairs_and_flags_spike(tmp_path: Path) -> No
     assert output_config["paths"]["sv_type_enrichment"] == str(
         (out_dir / "sv_type_enrichment.tsv").resolve()
     )
+
+
+def test_stage5_optionally_collapses_same_locus_with_similar_lengths() -> None:
+    haploblocks = pd.DataFrame([
+        {"haploblock_id": "block", "chrom": "chr1", "start": 0, "end": 1_000},
+    ])
+    sv_blocks = pd.DataFrame([
+        {"sv_record_id": "first", "haploblock_id": "block", "chrom": "chr1",
+         "start": 100, "end": 101, "sv_type": "INS", "length": 300},
+        {"sv_record_id": "similar", "haploblock_id": "block", "chrom": "chr1",
+         "start": 100, "end": 101, "sv_type": "INS", "length": 305},
+        {"sv_record_id": "different", "haploblock_id": "block", "chrom": "chr1",
+         "start": 100, "end": 101, "sv_type": "INS", "length": 320},
+    ])
+
+    preserved = stage5_type_enrichment.enrichment_table(
+        sv_blocks, haploblocks, q_threshold=0.05
+    )
+    collapsed = stage5_type_enrichment.enrichment_table(
+        sv_blocks, haploblocks, q_threshold=0.05, collapse_length_tolerance=10
+    )
+
+    assert preserved.loc[0, "observed_count"] == 3
+    assert collapsed.loc[0, "observed_count"] == 2
 
 
 def test_stage5_handles_an_empty_assignment_table() -> None:

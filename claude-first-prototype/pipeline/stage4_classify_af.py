@@ -8,6 +8,11 @@ without circularity.
 Outputs:
   - sv_af_classification.tsv: one row per SV and population
   - sv_classification.tsv: one row per SV
+  - sv_classification_haploblocks.tsv: one row per SV with haploblock assignments
+  - haploblock_population_specific_summary.tsv: summary of population-specific SVs within haploblocks
+  - stage4_summary.tsv: overall summary of the classification results
+  - population_specific_summary.tsv: summary of population-specific SVs across all populations
+
 """
 
 from __future__ import annotations
@@ -20,6 +25,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import yaml
+
+import matplotlib.pyplot as plt
 
 from sv_contract import METADATA_COLUMNS
 
@@ -156,6 +163,379 @@ def classify(
             )
     return pd.DataFrame(population_rows), pd.DataFrame(classification_rows)
 
+## New Function to load haploblock assignments
+def load_haploblock_assignments(
+    config: dict,
+    config_dir: Path,
+) -> pd.DataFrame:
+    """Load one row per SV-haploblock overlap from Stage 1 summaries."""
+    tables = []
+
+    for chrom, path in config["paths"]["sv_block_summary"].items():
+        block_summary = pd.read_csv(
+            resolve_path(path, config_dir),
+            sep="\t",
+        )
+
+        required_columns = {
+            "sv_record_id",
+            "haploblock_id",
+            "block_start",
+            "block_end",
+        }
+        missing = required_columns - set(block_summary.columns)
+        if missing:
+            raise ValueError(
+                f"{chrom} block summary is missing columns: {sorted(missing)}"
+            )
+
+        tables.append(
+            block_summary[
+                [
+                    "sv_record_id",
+                    "haploblock_id",
+                    "block_start",
+                    "block_end",
+                ]
+            ].drop_duplicates()
+        )
+
+    if not tables:
+        return pd.DataFrame(
+            columns=[
+                "sv_record_id",
+                "haploblock_id",
+                "block_start",
+                "block_end",
+            ]
+        )
+
+    return pd.concat(tables, ignore_index=True).drop_duplicates()
+
+def write_informative_summary(
+    classifications: pd.DataFrame,
+    classification_haploblocks: pd.DataFrame,
+    output_dir: Path,
+) -> None:
+    """Write summary tables for population-specific SVs and haploblocks."""
+
+    data = classification_haploblocks.copy()
+    data["has_haploblock"] = data["haploblock_id"].notna()
+
+    # One row per SV for overall classification counts.
+    sv_level = (
+        data.groupby("sv_record_id", as_index=False)
+        .agg(
+            sv_class=("sv_class", "first"),
+            specific_to_population=("specific_to_population", "first"),
+            haploblock_count=("haploblock_id", "nunique"),
+            has_haploblock=("has_haploblock", "any"),
+        )
+    )
+
+    overall_summary = pd.DataFrame(
+        [
+            {
+                "total_unique_svs": sv_level["sv_record_id"].nunique(),
+                "common_svs": int((sv_level["sv_class"] == "common").sum()),
+                "population_specific_svs": int(
+                    (sv_level["sv_class"] == "population_specific").sum()
+                ),
+                "other_svs": int((sv_level["sv_class"] == "other").sum()),
+                "svs_overlapping_haploblocks": int(
+                    sv_level["has_haploblock"].sum()
+                ),
+                "svs_outside_haploblocks": int(
+                    (~sv_level["has_haploblock"]).sum()
+                ),
+            }
+        ]
+    )
+    overall_summary.to_csv(
+        output_dir / "stage4_summary.tsv",
+        sep="\t",
+        index=False,
+    )
+
+    # One row per population-specific SV and population.
+    population_summary = (
+        data[data["sv_class"] == "population_specific"]
+        .dropna(subset=["haploblock_id"])
+        .groupby("specific_to_population", as_index=False)
+        .agg(
+            population_specific_svs=("sv_record_id", "nunique"),
+            haploblocks=("haploblock_id", "nunique"),
+        )
+        .rename(
+            columns={
+                "specific_to_population": "population",
+            }
+        )
+        .sort_values("population")
+    )
+    population_summary.to_csv(
+        output_dir / "population_specific_summary.tsv",
+        sep="\t",
+        index=False,
+    )
+
+    # One row per haploblock. Use nunique because one SV can produce
+    # multiple rows when it overlaps multiple blocks.
+    block_data = data.dropna(subset=["haploblock_id"])
+
+    block_summary = (
+        block_data.groupby("haploblock_id", as_index=False)
+        .agg(
+            total_svs=("sv_record_id", "nunique"),
+            common_svs=(
+                "sv_record_id",
+                lambda values: values[
+                    block_data.loc[values.index, "sv_class"] == "common"
+                ].nunique(),
+            ),
+            population_specific_svs=(
+                "sv_record_id",
+                lambda values: values[
+                    block_data.loc[values.index, "sv_class"]
+                    == "population_specific"
+                ].nunique(),
+            ),
+            populations_with_specific_svs=(
+                "specific_to_population",
+                lambda values: ", ".join(sorted(set(values.dropna()))),
+            ),
+            block_start=("block_start", "first"),
+            block_end=("block_end", "first"),
+        )
+        .sort_values(
+            ["population_specific_svs", "total_svs"],
+            ascending=[False, False],
+        )
+    )
+
+    block_summary.to_csv(
+        output_dir / "haploblock_population_specific_summary.tsv",
+        sep="\t",
+        index=False,
+    )
+
+    log.info("Stage 4 summary:")
+    for column, value in overall_summary.iloc[0].items():
+        log.info("  %s: %s", column, value)
+    log.info(
+        "Wrote %s",
+        output_dir / "haploblock_population_specific_summary.tsv",
+    )
+def write_stage4_plots(
+    classification_haploblocks: pd.DataFrame,
+    output_dir: Path,
+    chrom: str,
+    top_haploblocks: int,
+) -> None:
+    """Write chromosome-specific plots for SV class and population specificity."""
+
+    chrom_data = classification_haploblocks[
+        classification_haploblocks["chrom"] == chrom
+    ].copy()
+
+    chrom_data = chrom_data.dropna(subset=["haploblock_id"])
+
+    if chrom_data.empty:
+        log.warning("No haploblock-overlapping SVs available for %s plots", chrom)
+        return
+
+    plot_dir = output_dir / chrom
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    # Count each SV once within each haploblock.
+    unique_sv_block = chrom_data.drop_duplicates(
+        ["sv_record_id", "haploblock_id"]
+    )
+
+    block_counts = (
+        unique_sv_block.groupby(
+            ["haploblock_id", "sv_class"],
+            as_index=False,
+        )
+        .size()
+        .pivot(
+            index="haploblock_id",
+            columns="sv_class",
+            values="size",
+        )
+        .fillna(0)
+    )
+
+    for column in ["common", "population_specific", "other"]:
+        if column not in block_counts:
+            block_counts[column] = 0
+
+    block_counts = block_counts[["common", "population_specific", "other"]]
+    block_counts["total_svs"] = block_counts.sum(axis=1)
+    block_counts = block_counts.sort_index()
+
+    # Plot 1: class composition across all haploblocks.
+    ax = block_counts[
+        ["common", "population_specific", "other"]
+    ].plot(
+        kind="bar",
+        stacked=True,
+        figsize=(18, 7),
+        color=["#4C78A8", "#E45756", "#B9B9B9"],
+        width=0.9,
+    )
+
+    ax.set_title(f"{chrom}: SV classification by haploblock")
+    ax.set_xlabel("Haploblock")
+    ax.set_ylabel("Unique SV count")
+
+    # Show only about 30 readable haploblock labels while retaining
+    # every haploblock bar in the plot.
+    label_step = max(1, len(block_counts) // 30)
+    label_positions = list(range(0, len(block_counts), label_step))
+    label_values = [
+        str(block_counts.index[position])
+        for position in label_positions
+    ]
+
+    ax.set_xticks(label_positions)
+    ax.set_xticklabels(
+        label_values,
+        rotation=45,
+        ha="right",
+        fontsize=7,
+    )
+
+    ax.legend(title="SV class")
+    ax.figure.tight_layout()
+    ax.figure.savefig(
+        plot_dir / "haploblock_sv_classification.png",
+        dpi=200,
+        bbox_inches="tight",
+    )
+    plt.close(ax.figure)
+    
+    # Select haploblocks with the largest population-specific SV counts.
+    ranked_blocks = (
+        block_counts.sort_values(
+            ["population_specific", "total_svs"],
+            ascending=[False, False],
+        )
+        .head(top_haploblocks)
+        .index
+    )
+
+    specific_data = unique_sv_block[
+        (unique_sv_block["sv_class"] == "population_specific")
+        & unique_sv_block["haploblock_id"].isin(ranked_blocks)
+    ]
+
+    # Plot 2: population-specific SVs by haploblock and subpopulation.
+    population_counts = (
+        specific_data.dropna(subset=["specific_to_population"])
+        .drop_duplicates(["sv_record_id", "haploblock_id"])
+        .groupby(
+            ["haploblock_id", "specific_to_population"],
+            as_index=False,
+        )
+        .size()
+        .pivot(
+            index="haploblock_id",
+            columns="specific_to_population",
+            values="size",
+        )
+        .fillna(0)
+    )
+
+    if not population_counts.empty:
+        population_counts = population_counts.loc[
+            [block for block in ranked_blocks if block in population_counts.index]
+        ]
+
+        ax = population_counts.plot(
+            kind="bar",
+            stacked=True,
+            figsize=(18, 8),
+            colormap="tab20",
+            width=0.9,
+        )
+
+        ax.set_title(
+            f"{chrom}: population-specific SVs in top haploblocks"
+        )
+        ax.set_xlabel("Haploblock")
+        ax.set_ylabel("Unique population-specific SV count")
+        ax.tick_params(axis="x", labelrotation=90)
+        ax.legend(
+            title="Subpopulation",
+            bbox_to_anchor=(1.02, 1),
+            loc="upper left",
+        )
+        ax.figure.tight_layout()
+        ax.figure.savefig(
+            plot_dir / "population_specific_by_haploblock.png",
+            dpi=200,
+            bbox_inches="tight",
+        )
+        plt.close(ax.figure)
+
+    # Plot 3: population-specific fraction by genomic position.
+    fraction_data = block_counts.copy()
+    block_coordinates = (
+        unique_sv_block[
+            ["haploblock_id", "block_start", "block_end"]
+        ]
+        .drop_duplicates("haploblock_id")
+        .set_index("haploblock_id")
+    )
+
+    fraction_data = fraction_data.join(block_coordinates)
+    fraction_data["population_specific_fraction"] = (
+        fraction_data["population_specific"]
+        / fraction_data["total_svs"].replace(0, np.nan)
+    )
+    fraction_data["midpoint_mb"] = (
+        (fraction_data["block_start"] + fraction_data["block_end"]) / 2
+    ) / 1_000_000
+
+    ax = fraction_data.plot(
+        x="midpoint_mb",
+        y="population_specific_fraction",
+        kind="scatter",
+        figsize=(12, 6),
+        s=np.maximum(fraction_data["total_svs"] * 2, 20),
+        color="#E45756",
+        alpha=0.75,
+    )
+
+    ax.set_title(
+        f"{chrom}: population-specific SV fraction by haploblock position"
+    )
+    ax.set_xlabel("Haploblock midpoint (Mb)")
+    ax.set_ylabel("Population-specific SVs / total SVs")
+    ax.set_ylim(0, 1)
+    ax.figure.tight_layout()
+    ax.figure.savefig(
+        plot_dir / "population_specific_fraction.png",
+        dpi=200,
+    )
+    plt.close(ax.figure)
+
+    block_counts.reset_index().to_csv(
+        plot_dir / "haploblock_plot_data.tsv",
+        sep="\t",
+        index=False,
+    )
+
+    if not population_counts.empty:
+        population_counts.reset_index().to_csv(
+            plot_dir / "population_haploblock_plot_data.tsv",
+            sep="\t",
+            index=False,
+        )
+
+    log.info("Wrote Stage 4 plots for %s to %s", chrom, plot_dir)
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -164,6 +544,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--af-threshold", type=float, default=0.05)
     parser.add_argument("--absent-af-threshold", type=float, default=0.01)
     parser.add_argument("--min-samples-per-population", type=int, default=2)
+    parser.add_argument( "--plots",action="store_true",help="Generate chromosome-specific Stage 4 plots",)
+    parser.add_argument("--plot-dir", type=Path, default=None, help="Directory for plots; defaults to <out-dir>/stage4_plots")
+    parser.add_argument("--top-haploblocks", type=int,default=20,help="Number of haploblocks shown in ranked plots")
     return parser.parse_args(argv)
 
 
@@ -196,6 +579,46 @@ def main(argv: list[str] | None = None) -> None:
     by_population.to_csv(by_population_path, sep="\t", index=False)
     classifications.to_csv(classification_path, sep="\t", index=False)
 
+    haploblock_assignments = load_haploblock_assignments(
+        config,
+        config_dir,
+    )
+    
+    classification_haploblocks = classifications.merge(
+        haploblock_assignments,
+        on="sv_record_id",
+        how="left",
+    )
+    
+    classification_haploblocks_path = (
+        args.out_dir / "sv_classification_haploblocks.tsv"
+    )
+    
+    classification_haploblocks.to_csv(
+        classification_haploblocks_path,
+        sep="\t",
+        index=False,
+    )
+
+    write_informative_summary(
+        classifications,
+        classification_haploblocks,
+        args.out_dir,
+    )
+
+    if args.plots:
+        plot_dir = args.plot_dir or args.out_dir / "stage4_plots"
+
+        for chrom in config["paths"]["sv_genotypes"]:
+            write_stage4_plots(
+                classification_haploblocks,
+                plot_dir,
+                chrom,
+                args.top_haploblocks,
+            )
+
+    
+    
     class_counts = classifications["sv_class"].value_counts().to_dict()
     log.info("Classified %d SVs: %s", len(classifications), class_counts)
     log.info("Other fraction: %.3f", class_counts.get("other", 0) / len(classifications))
@@ -214,6 +637,7 @@ def main(argv: list[str] | None = None) -> None:
         {
             "sv_af_classification": str(by_population_path.resolve()),
             "sv_classification": str(classification_path.resolve()),
+            "sv_classification_haploblocks": str(classification_haploblocks_path.resolve()),
         }
     )
     (args.out_dir / "config.yaml").write_text(yaml.safe_dump(stage4_config, sort_keys=False))

@@ -7,3 +7,5 @@ __pycache__/
 *.py[cod]
 claude-first-prototype/stage*_output/
 input/
+.venv/
+.github/agents/sv-pipeline-tester.agent.md
