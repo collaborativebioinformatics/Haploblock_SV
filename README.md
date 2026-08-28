@@ -100,16 +100,34 @@ The pipeline is currently under active development
 # Results
 The current prototype uses 1kgp_ont_cohort.postfilter.full.vcf.gz , a previously merged structural variant callset derived from the 1000 Genome Project Oxford Nanopore Technologies (ONT) cohort, comprising a total of 402 samples. For this initial demonstration, we focused on chromosome 21 to confirm successful integration of the pipeline, and assess the overall analytical framework. 
 
+The purpose of Stage 2 purpose is to classify SVs based on their positional relationship to haploblock regions. For this demonstration, the input VCF contained 83,159 unique SV records, which were categorized into three classes
+
+| Position class | Count | Definition |
+|---|---|---|
+|within block|60,367|The SV overlaps exactly one haploblock.|
+|outside block|22,760|The SV overlaps exactly no haploblock.|
+|boundary crossing|22|The SV overlaps two or more haploblocks.|
+
+These results provide a quantification on how SVs are distributed relative to haploblock regions. In addition to their positional classification, 17,222 SVs were classified as near boundary, indication that they occur close to a haploblock boundary, whereas 65,927 Svs were classified as not near boundary. 
+
 The purpose of Stage 4 is to classify each structural variant (SV) according to its allele frequency (AF) distribution across population subgroups within the cohort and to associate these classifications with haploblocks. This analysis enables the identification of population haploblocks with enriched population-specific SVs but it does not test association with the SNV-derived clusters. 
 
+![Stage 4 haploblock SV classification](figures/haploblock_sv_classification.png)
 Figure 1-stage4: The figure illustrates the distribution of structural variant (SV) composition across haploblocks on chromosome 21, based on allele frequencies observed in the study cohort. 
 
+![Stage 4 haploblock SV classification](figures/population_specific_by_haploblock.png)
 Figure 2-stage4: Top 30 haplablocks ranked by the number of unique structural variants (SVs) observed exclusively within each subpopulation. Each unique SV is counted once per subpopulation, provided that at least two samples carry the SV.
+
+Stage 6 (In Progress still reviewing and verifying data)
+
+Given only the current sample size in chromosome 21 and analysis filters, the results do not provide evidence the predefined SNV-derived clusters consistently explain population-specific SV carriage after subpopulation adjustment. 
+
 
 
 # Future steps
 
-- Create region-level FASTA files containing SNPs and SVs, reclusters the haploblocks using MMseqs2, and verify that the resulting clusters match the original ones. 
+- Add informative plots to all the stages
+- Verify all stages results and modify them as need it.  
 
 
 # References
