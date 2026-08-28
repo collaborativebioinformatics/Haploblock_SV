@@ -23,22 +23,58 @@ def test_sv_types_receive_distinct_gene_consequences() -> None:
     common = {
         "chrom": "chr1", "length": 20, "filter": "PASS", "imprecise": False,
         "haploblock_id": "b", "best_cluster_id": "c",
-        "association_pattern": "portable_cluster_tag", "population_adjusted_r": 0.8,
+        "association_pattern": "cross_population_consistent_tag_candidate",
+        "population_adjusted_r": 0.8,
         "q_value": 0.001, "informative_populations": 2, "directional_consistency": 1.0,
     }
     candidates = pd.DataFrame([
         {**common, "sv_id": "del", "start": 125, "end": 135, "sv_type": "DEL"},
+        {**common, "sv_id": "del_exon", "start": 110, "end": 150, "sv_type": "DEL"},
         {**common, "sv_id": "ins", "start": 130, "end": 131, "sv_type": "INS"},
         {**common, "sv_id": "dup", "start": 90, "end": 210, "sv_type": "DUP"},
         {**common, "sv_id": "inv_break", "start": 150, "end": 280, "sv_type": "INV"},
         {**common, "sv_id": "inv_span", "start": 250, "end": 400, "sv_type": "INV"},
     ])
 
-    result = stage8_candidate_annotation.annotate_candidates(candidates, features).set_index("sv_id")
-    assert result.loc["del", "consequence"] == "exon_loss"
+    serial_result = stage8_candidate_annotation.annotate_candidates(candidates, features)
+    parallel_result = stage8_candidate_annotation.annotate_candidates(candidates, features, threads=2)
+    pd.testing.assert_frame_equal(serial_result, parallel_result)
+    result = serial_result.set_index("sv_id")
+    assert result.loc["del", "consequence"] == "exonic_deletion"
+    assert result.loc["del_exon", "consequence"] == "complete_exon_loss"
     assert result.loc["ins", "consequence"] == "exonic_insertion"
     assert result.loc["dup", "consequence"] == "complete_gene_duplication"
     assert result.loc["inv_break", "consequence"] == "inversion_breakpoint_disruption"
     assert result.loc["inv_span", "consequence"] == "gene_within_inversion"
     assert result.loc["inv_span", "overlap_basis"] == "span_only"
+    assert set(result["call_quality"]) == {"pass_precise"}
+    assert "candidate_score" not in result.columns
 
+
+def test_representation_fields_are_carried_into_annotation() -> None:
+    candidates = pd.DataFrame([{
+        "sv_record_id": "record_1", "sv_id": "v1", "chrom": "chr1",
+        "start": 10, "end": 11, "sv_type": "INS", "length": 1,
+        "filter": "PASS", "imprecise": False, "haploblock_id": "block",
+        "best_cluster_id": "C1", "association_pattern": "cluster_associated",
+        "population_adjusted_r": 0.8, "q_value": 0.01,
+        "informative_populations": 2, "directional_consistency": 1.0,
+    }])
+    representation = pd.DataFrame([{
+        "sv_record_id": "record_1", "haploblock_id": "block",
+        "representation_pattern": "multi_cluster_sv_candidate",
+        "n_supported_carrier_clusters": 3,
+        "top_cluster_carrier_evidence_share": 0.5,
+        "top_standard_evidence_cluster_id": "C2",
+        "top_standard_cluster_carrier_evidence_share": 0.8,
+        "effective_standard_carrier_cluster_count": 1.5,
+        "top_standard_cluster_carrier_rate": 0.9,
+    }])
+    result = stage8_candidate_annotation.annotate_candidates(
+        candidates, pd.DataFrame(columns=["chrom", "feature", "start", "end", "gene_name"]),
+        representation=representation,
+    ).iloc[0]
+    assert result["representation_pattern"] == "multi_cluster_sv_candidate"
+    assert result["n_supported_carrier_clusters"] == 3
+    assert result["top_standard_evidence_cluster_id"] == "C2"
+    assert result["top_standard_cluster_carrier_evidence_share"] == 0.8

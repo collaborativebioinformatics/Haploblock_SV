@@ -118,6 +118,14 @@ def load_sv_metadata(vcf_path: Path, chroms: list[str], max_id_length: int) -> d
     return {chrom: pd.DataFrame(chrom_rows, columns=METADATA_COLUMNS) for chrom, chrom_rows in rows.items()}
 
 
+def load_stage1_metadata(paths: dict[str, str], chroms: list[str]) -> dict[str, pd.DataFrame]:
+    """Read the per-record metadata that Stage 1 already extracted from the VCF."""
+    return {
+        chrom: pd.read_csv(paths[chrom], sep="\t", usecols=METADATA_COLUMNS)
+        for chrom in chroms
+    }
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("stage1_output/config.yaml"))
@@ -143,7 +151,12 @@ def main(argv: list[str] | None = None) -> None:
         if args.max_sv_id_length is not None
         else config["settings"]["max_sv_id_length"]
     )
-    sv_by_chrom = load_sv_metadata(Path(config["paths"]["vcf"]), chroms, max_id_length)
+    genotype_paths = config["paths"].get("sv_genotypes", {})
+    if all(chrom in genotype_paths for chrom in chroms):
+        log.info("Reusing Stage 1 SV metadata instead of re-reading the VCF")
+        sv_by_chrom = load_stage1_metadata(genotype_paths, chroms)
+    else:
+        sv_by_chrom = load_sv_metadata(Path(config["paths"]["vcf"]), chroms, max_id_length)
     qc = {"boundary_distance_bp": boundary_bp, "chromosomes": {}}
     for chrom in chroms:
         haploblocks = pd.read_csv(config["paths"]["haploblocks"][chrom], sep="\t")

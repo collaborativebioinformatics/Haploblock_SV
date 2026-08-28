@@ -5,8 +5,10 @@ tables. Each unique SV-haploblock pair is counted once, independently of how
 many clusters passed Stage 1's association threshold.
 
 For each SV type, the expected count in a block is its length multiplied by
-the genome-wide rate across haploblocks. Two-sided Poisson p-values are
-adjusted across the complete haploblock-by-type grid using Benjamini-Hochberg.
+the genome-wide rate across haploblocks. Optionally, records sharing exact
+coordinates, type, and sufficiently similar SV lengths are collapsed before
+counting. Two-sided Poisson p-values are adjusted across the complete
+haploblock-by-type grid using Benjamini-Hochberg.
 """
 
 from __future__ import annotations
@@ -31,6 +33,25 @@ ENRICHMENT_COLUMNS = [
 ]
 
 
+def collapse_similar_locus_records(
+    sv_blocks: pd.DataFrame,
+    length_tolerance: int | None,
+) -> pd.DataFrame:
+    """Collapse records only when their locus, type, and length agree closely."""
+    if length_tolerance is None:
+        return sv_blocks
+    keys = ["haploblock_id", "chrom", "start", "end", "sv_type"]
+    collapsed = []
+    for _, group in sv_blocks.groupby(keys, sort=False):
+        group = group.sort_values("length")
+        group_start = None
+        for _, row in group.iterrows():
+            if group_start is None or row["length"] - group_start > length_tolerance:
+                collapsed.append(row)
+                group_start = row["length"]
+    return pd.DataFrame(collapsed, columns=sv_blocks.columns)
+
+
 def resolve_path(path: str, config_dir: Path) -> Path:
     path = Path(path)
     return path if path.is_absolute() else config_dir / path
@@ -50,9 +71,11 @@ def enrichment_table(
     sv_blocks: pd.DataFrame,
     haploblocks: pd.DataFrame,
     q_threshold: float,
+    collapse_length_tolerance: int | None = None,
 ) -> pd.DataFrame:
     """Return the complete haploblock-by-SV-type enrichment table."""
     assigned = sv_blocks.drop_duplicates(["sv_record_id", "haploblock_id"])
+    assigned = collapse_similar_locus_records(assigned, collapse_length_tolerance)
     blocks = haploblocks.drop_duplicates("haploblock_id").copy()
     blocks["length"] = blocks["end"] - blocks["start"]
 
@@ -103,6 +126,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=Path("stage1_output/config.yaml"))
     parser.add_argument("--out-dir", type=Path, default=Path("stage5_output"))
     parser.add_argument("--q-threshold", type=float, default=0.05)
+    parser.add_argument(
+        "--collapse-length-tolerance", type=int, default=None,
+        help=(
+            "Collapse records with the same chrom/start/end/type when their "
+            "length differs by at most this many bp; default preserves every record."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -125,7 +155,9 @@ def main(argv: list[str] | None = None) -> None:
         ],
         ignore_index=True,
     )
-    result = enrichment_table(sv_blocks, haploblocks, args.q_threshold)
+    result = enrichment_table(
+        sv_blocks, haploblocks, args.q_threshold, args.collapse_length_tolerance
+    )
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     output_path = args.out_dir / "sv_type_enrichment.tsv"
@@ -140,6 +172,10 @@ def main(argv: list[str] | None = None) -> None:
     stage5_config = dict(config)
     stage5_config["thresholds"] = dict(config["thresholds"])
     stage5_config["thresholds"]["sv_type_enrichment_q"] = args.q_threshold
+    stage5_config["settings"] = dict(config.get("settings", {}))
+    stage5_config["settings"]["collapse_length_tolerance_bp"] = (
+        args.collapse_length_tolerance
+    )
     stage5_config["paths"] = dict(config["paths"])
     stage5_config["paths"]["sv_type_enrichment"] = str(output_path.resolve())
     (args.out_dir / "config.yaml").write_text(yaml.safe_dump(stage5_config, sort_keys=False))

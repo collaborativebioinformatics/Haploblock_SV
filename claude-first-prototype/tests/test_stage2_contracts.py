@@ -6,11 +6,12 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import yaml
 
 PIPELINE_DIR = Path(__file__).resolve().parents[1] / "pipeline"
 sys.path.insert(0, str(PIPELINE_DIR))
 
-from stage2_intersect import METADATA_COLUMNS, classify_sv_positions, load_sv_metadata
+from stage2_intersect import METADATA_COLUMNS, classify_sv_positions, load_sv_metadata, main
 
 
 def test_crossing_and_proximity_are_separate() -> None:
@@ -65,3 +66,42 @@ def test_vcf_metadata_has_schema_when_a_chromosome_has_no_records(tmp_path: Path
 
     assert list(result.columns) == METADATA_COLUMNS
     assert result.empty
+
+
+def test_stage2_reuses_stage1_metadata_without_reading_the_vcf(tmp_path: Path) -> None:
+    genotype_path = tmp_path / "sv_genotypes.chr1.tsv"
+    pd.DataFrame(
+        [{
+            "sv_record_id": "chr1_record_1",
+            "sv_id": "sv1",
+            "chrom": "chr1",
+            "start": 20,
+            "end": 30,
+            "sv_type": "DEL",
+            "length": -10,
+            "filter": "PASS",
+            "imprecise": False,
+            "sample1": "0/1",
+        }]
+    ).to_csv(genotype_path, sep="\t", index=False)
+    haploblock_path = tmp_path / "haploblocks.chr1.tsv"
+    pd.DataFrame([{"haploblock_id": "block1", "chrom": "chr1", "start": 0, "end": 100}]).to_csv(
+        haploblock_path, sep="\t", index=False
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({
+        "paths": {
+            "vcf": str(tmp_path / "missing.vcf.gz"),
+            "sv_genotypes": {"chr1": str(genotype_path)},
+            "haploblocks": {"chr1": str(haploblock_path)},
+        },
+        "thresholds": {"boundary_distance_bp": 5000},
+        "settings": {"max_sv_id_length": 80},
+    }))
+
+    output_dir = tmp_path / "stage2"
+    main(["--config", str(config_path), "--out-dir", str(output_dir)])
+
+    result = pd.read_csv(output_dir / "boundary_svs.chr1.tsv", sep="\t")
+    assert result.loc[0, "sv_record_id"] == "chr1_record_1"
+    assert result.loc[0, "position_class"] == "within_block"
