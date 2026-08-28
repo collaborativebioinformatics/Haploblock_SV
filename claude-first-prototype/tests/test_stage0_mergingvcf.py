@@ -124,6 +124,23 @@ def test_stage0_merges_and_collapses_manifest(tmp_path):
     commands = [json.loads(line) for line in tool_log.read_text().splitlines()]
     merge = next(command for command in commands if command["args"][0] == "merge")
     assert merge["args"][1:3] == ["-m", "id"]
+    truvari_index = next(
+        index
+        for index, command in enumerate(commands)
+        if command["tool"] == "truvari"
+    )
+    output_steps = commands[truvari_index + 1 :]
+    assert [command["args"][0] for command in output_steps[:4]] == [
+        "sort",
+        "index",
+        "sort",
+        "index",
+    ]
+    assert all(
+        "--threads" not in command["args"]
+        for command in output_steps
+        if command["args"][0] == "sort"
+    )
 
 
 @pytest.mark.parametrize(

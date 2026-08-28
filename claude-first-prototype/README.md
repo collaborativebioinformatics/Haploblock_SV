@@ -10,7 +10,7 @@ Haploblocks — genomic regions of conserved haplotype structure identified by t
 
 | # | Stage | Purpose | Addresses |
 |---|---|---|---|
-| 0 | Cohort SV merging | Download/accept single-sample long-read VCFs, merge samples, and reconcile equivalent representations with `truvari collapse` | Placeholder; Linh is working on it |
+| 0 | Cohort SV merging | Accept a manifest of single-sample long-read VCFs, sort and merge samples, and reconcile equivalent representations with `truvari collapse` | Implemented |
 | 1 | Cluster-aware preprocessing | Infer SV-to-haploblock-cluster associations from a merged cohort VCF and write probability/support/QC outputs | Implemented |
 | 2 | Boundary classification | Descriptively classify each SV as safely within or near/crossing a block boundary | Optional/implemented |
 | 3 | Boundary enrichment test | Earlier proposal for permutation/spacing tests; not part of the current pipeline | Future decision |
@@ -51,24 +51,33 @@ The schedule below is preserved from the initial planning pass. It is not the cu
 
 - **Per-stage sanity checks on a small slice:** once the downstream analyses are selected, run those stages on one chromosome (e.g., chr22) or a synthetic haploblock+SV set before running genome-wide; confirm intersection counts (Stage 2), classification counts (Stage 4), and enrichment p-value distributions (Stage 5) look sane (e.g., p-values roughly uniform under a shuffled-label negative control).
 - **Negative controls:** if Stage 3 is pursued, run its permutation test on shuffled data; also rerun Stage 5 after shuffling SV types among blocks. Neither should show systematic enrichment.
-- **End-to-end integration run:** once Stage 0 is implemented, execute the selected stages on one chromosome and confirm the expected outputs are populated.
+- **End-to-end integration run:** execute the selected stages on one chromosome and confirm the expected outputs are populated.
 - **Validation against known structure:** if Stage 7 is pursued, compare SV-based structure with population labels supplied in `sample_metadata.tsv` before interpreting agreement with haploblocks.org clusters.
 - **Reproducibility check:** re-run the full pipeline twice with the same config (fixed seeds) and confirm identical output; re-run once with a different seed and confirm permutation/UMAP results are stable within expected tolerance.
 
 ## Non-pip dependencies
 
-- `bcftools` and `truvari` — planned Stage 0 merge/collapse workflow being developed by Linh.
+- `bcftools` and `truvari` — required by Stage 0.
 - R is not required; the implemented pipeline is Python-only. Stage 5 uses SciPy for its current Poisson tests.
 
-## Current Stage 0 placeholder: cohort SV merging
+Current Stage 0: cohort SV merging
 
-Stage 0 is not yet implemented in this prototype. **Linh is working on it.** Its eventual role is to download or accept a list of single-sample long-read SV VCFs, combine the samples, and reconcile calls that describe the same biological SV differently. This representation-merging step is necessary because basecalling errors, mapping ambiguity around repeats, and variant-caller differences can shift breakpoints or otherwise produce different records for the same event.
+[`pipeline/stage_0_mergingvcf.py`](pipeline/stage_0_mergingvcf.py) accepts a
+manifest of local single-sample VCFs, validates sample names and contig
+compatibility, sorts and uniquely identifies each input, merges them with
+`bcftools merge -m id`, and reconciles equivalent representations with
+`truvari collapse`. Both `truvari` outputs are sorted before tabix indexing,
+because collapse output is not guaranteed to be coordinate ordered. See
+[`STAGE0_SUMMARY.md`](STAGE0_SUMMARY.md) for the command, output contract, and
+options.
 
-The planned Stage 0 will use sample merging followed by `truvari collapse`. It should also permit a different cohort to be supplied as a list of single-sample VCFs. It will not run kanpig. Consequently, it may retain inversions, while BND records will probably remain outside the merged callset.
+The workflow does not run kanpig. It can therefore retain variant types
+present in the input (including inversions), while BND handling remains
+dependent on the caller and downstream analysis.
 
 Stage 0 owns representation-level QC: reconciling equivalent calls, deduplicating them, and applying any cohort-wide FILTER or size policy. Stage 1 preserves every record it receives and reports genotype/association QC without silently removing IMPRECISE calls or particular SV types. Analysis-specific size or confidence subsets belong in the downstream analysis that requests them.
 
-For the hackathon, Stage 1 starts from the existing pre-merged VCF at `input/1kgp_ont_cohort.postfilter.full.vcf.gz`. That file was produced previously using:
+For the hackathon, Stage 1 can start from the existing pre-merged VCF at `input/1kgp_ont_cohort.postfilter.full.vcf.gz`, or from Stage 0's `merged.collapsed.vcf.gz`. The existing file was produced previously using:
 
 1. Sniffles SV calling
 2. `bcftools merge`

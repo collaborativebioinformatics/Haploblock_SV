@@ -270,6 +270,23 @@ def stage_input_vcf(vcf: Path, sample_index: int, staging_dir: Path, bcftools: s
     return staged_vcf
 
 
+def sort_and_index_vcf(
+    input_vcf: Path, output_vcf: Path, bcftools: str, threads: int
+) -> None:
+    """Sort a VCF to a final path and create its tabix index."""
+    run_command(
+        [
+            bcftools,
+            "sort",
+            "-Oz",
+            "-o",
+            str(output_vcf),
+            str(input_vcf),
+        ]
+    )
+    run_command([bcftools, "index", "--tbi", "--threads", str(threads), str(output_vcf)])
+
+
 def merge_vcfs(
     vcfs: list[Path],
     out_dir: Path,
@@ -335,15 +352,13 @@ def merge_vcfs(
     run_command(collapse_command)
 
     # truvari collapse doesn't guarantee its output stays in strict
-    # chrom+pos order in every case (e.g. large fractions of the input
-    # passed straight through unanalyzed), so re-sort defensively before
-    # indexing rather than let tabix fail deep in the pipeline.
+    # chrom+pos order in every case, so re-sort before indexing.
     collapsed = out_dir / "merged.collapsed.vcf.gz"
     removed = out_dir / "merged.collapsed_removed.vcf.gz"
-    run_command([bcftools, "sort", "-Oz", "-o", str(collapsed), str(collapsed_raw)])
-    run_command([bcftools, "sort", "-Oz", "-o", str(removed), str(removed_raw)])
-    run_command([bcftools, "index", "--tbi", str(collapsed)])
-    run_command([bcftools, "index", "--tbi", str(removed)])
+    sort_and_index_vcf(collapsed_raw, collapsed, bcftools, threads)
+    sort_and_index_vcf(removed_raw, removed, bcftools, threads)
+    collapsed_raw.unlink()
+    removed_raw.unlink()
 
     for label, path in [("merged (pre-collapse)", merged), ("collapsed (kept)", collapsed), ("removed (collapsed-away)", removed)]:
         count = capture_command([bcftools, "index", "-n", str(path)]).strip()
