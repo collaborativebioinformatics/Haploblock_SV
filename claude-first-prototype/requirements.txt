@@ -1,5 +1,6 @@
 # Stage 1 cluster-aware preprocessing
 numpy
+pysam
 requests
 pyyaml
 

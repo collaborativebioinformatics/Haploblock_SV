@@ -61,11 +61,44 @@ def test_within_population_test_separates_portable_from_ancestry_signal() -> Non
     summary = stage6_cluster_association.summarize_associations(
         result, q_threshold=0.05, min_abs_r=0.3
     )
+    assert result.groupby(["sv_record_id", "haploblock_id"])["q_value"].nunique().max() == 1
 
     portable = summary[summary["sv_id"] == "portable"].iloc[0]
-    assert portable["association_pattern"] == "portable_cluster_tag"
+    assert portable["association_pattern"] == "cross_population_consistent_tag_candidate"
+    assert portable["association_direction"] == "carrier_enriched"
+    tag = result[(result["sv_id"] == "portable") & (result["cluster_id"] == "tag")].iloc[0]
+    assert tag["n_samples_with_cluster"] == 8
+    assert tag["n_sv_carriers_with_cluster"] == 8
+    assert tag["n_sv_noncarriers_with_cluster"] == 0
     ancestry = summary[summary["sv_id"] == "ancestry"].iloc[0]
     assert ancestry["association_pattern"] == "no_detected_cluster_signal"
+
+
+def test_summary_keeps_strong_exclusion_over_weak_enrichment() -> None:
+    common = {
+        "sv_record_id": "record", "sv_id": "v", "chrom": "chr1", "start": 1,
+        "end": 2, "sv_type": "INS", "length": 1, "filter": "PASS",
+        "imprecise": False, "haploblock_id": "block", "n_called": 20,
+        "n_cluster_carriers": 10, "n_samples_with_cluster": 10,
+        "n_sv_carriers_with_cluster": 5, "n_sv_noncarriers_with_cluster": 5,
+        "cluster_haplotype_count": 10, "carrier_rate_with_cluster": 0.5,
+        "carrier_rate_without_cluster": 0.5, "informative_populations": 2,
+        "directional_consistency": 1.0, "q_value": 0.01,
+    }
+    associations = pd.DataFrame([
+        {**common, "cluster_id": "weak_positive", "carrier_rate_difference": 0.05,
+         "association_direction": "carrier_enriched", "population_adjusted_r": 0.1,
+         "p_value": 0.2},
+        {**common, "cluster_id": "strong_negative", "carrier_rate_difference": -0.8,
+         "association_direction": "carrier_depleted", "population_adjusted_r": -0.9,
+         "p_value": 0.01},
+    ])
+    summary = stage6_cluster_association.summarize_associations(
+        associations, q_threshold=0.05, min_abs_r=0.3
+    ).iloc[0]
+    assert summary["best_cluster_id"] == "strong_negative"
+    assert summary["best_enriched_cluster_id"] == "weak_positive"
+    assert summary["association_pattern"] == "cluster_exclusion_signal"
 
 
 def test_record_ids_disambiguate_reused_vcf_ids_and_coordinates() -> None:
@@ -93,5 +126,7 @@ def test_record_ids_disambiguate_reused_vcf_ids_and_coordinates() -> None:
     result = stage6_cluster_association.association_table(
         pd.DataFrame(rows), blocks, memberships, metadata,
         permutations=19, seed=2, min_cluster_haplotypes=4, min_population_samples=4,
+        refinement_permutations=29, refinement_p_threshold=1.0,
     )
     assert set(result["sv_record_id"]) == {"record_1"}
+    assert set(result["permutations_used"]) == {29}

@@ -4,7 +4,7 @@ Prototype pipeline plan for the Structural Variants Hackathon at Baylor College 
 
 ## Introduction
 
-Haploblocks — genomic regions of conserved haplotype structure identified by the [haploblocks.org](https://haploblocks.org) / [data.haploblocks.org](https://data.haploblocks.org) projects via genomic hashing — capture a layer of population structure that is complementary to single-SNP analyses, but how structural variants (SVs) are organized relative to these blocks is unexplored. Our core research question is whether SV type, location, and population specificity are non-randomly distributed across haploblocks, and whether SV-bearing haplotypes correspond to the clusters already derived from small-variant haplotype hashes. The current primary input is a pre-merged 1000 Genomes ONT VCF; spatial-statistics, PCA/UMAP, cluster-agreement, and functional-overlay analyses below are retained as possible follow-up work rather than current commitments. What's novel is treating haploblock **clusters**, rather than only immutable block regions, as the unit of SV interpretation.
+Haploblocks — genomic regions of conserved haplotype structure identified by the [haploblocks.org](https://haploblocks.org) / [data.haploblocks.org](https://data.haploblocks.org) projects via genomic hashing — capture a layer of population structure that is complementary to single-SNP analyses, but how structural variants (SVs) are organized relative to these blocks is unexplored. Our core research question is narrower than asking whether SVs recapitulate ancestry: **what information about structural variation is captured, or missed, by these particular recombination-defined genomic-hash clusters?** The current primary input is a pre-merged 1000 Genomes ONT VCF; spatial-statistics, PCA/UMAP, cluster-agreement, and functional-overlay analyses below are retained as possible follow-up work rather than current commitments. What's novel is treating haploblock **clusters**, rather than only immutable block regions, as the unit of SV interpretation and directly measuring when those clusters do or do not resolve SV carriage.
 
 ## Pipeline overview
 
@@ -17,8 +17,8 @@ Haploblocks — genomic regions of conserved haplotype structure identified by t
 | 4 | Common vs. population-specific SV classification | Calculate AF using populations supplied by `sample_metadata.tsv`, independently of haploblocks.org clusters | Implemented |
 | 5 | Per-haploblock SV-type enrichment | Length-adjusted Poisson tests across the complete block-by-type grid, with BH-FDR correction | Implemented |
 | 6 | Population-conditioned SV–cluster association | Test whether local SNV-derived clusters predict SV carriage beyond population membership and whether associations transfer across populations | Implemented |
-| 7 | Haploblock information gain and structure QC | Measure what local hashes capture or miss about SV carriage; retain SV PCA as descriptive QC | Implemented |
-| 8 | Consequence-aware candidate annotation | Interpret prioritized SVs using type-aware gene/exon and breakpoint consequences | Implemented |
+| 7 | Hash representation audit and structure QC | Measure carrier concentration across clusters and carrier purity within clusters; retain information gain and SV PCA as secondary diagnostics | Implemented |
+| 8 | Consequence-aware representation annotation | Add type-aware gene/exon and breakpoint context to SVs captured or missed by the hashes | Implemented |
 | 9 | Integration & report | Aggregate analysis results into a per-haploblock summary and plots | Proposed |
 
 If pursued, Stages 4–8 contain separable questions and can largely be divided across the team after Stage 1 outputs have been evaluated.
@@ -34,6 +34,31 @@ population background, and when SVs subdivide an existing hash and add previousl
 local information. Candidate annotation then distinguishes plausible breakpoint, exon, dosage, and
 span consequences rather than treating every gene overlap equally. These changes retain the useful
 components of the original plan while producing more directly interpretable locus-level results.
+
+## Biological decisions the pipeline should support
+
+The pipeline is an evaluation of a representation, not a metric-generation exercise. Its central
+outputs should support the following decisions:
+
+| Biological question | Current coverage | What is still needed | Why we care |
+|---|---|---|---|
+| Are SVs reliably tagged by the same genomic-hash cluster across populations? | Stage 6 estimates population-conditioned association and directional consistency. | Use batch-aware maximum-statistic permutations and held-out or leave-one-population-out validation; distinguish positive carrier tags from negative exclusion tags. | A portable tag would let the existing hash stand in for an expensive SV genotype in cohorts where long-read data are unavailable. |
+| Do SVs subdivide an apparently homogeneous SNV-derived cluster? | Stage 7 reports count-supported mixed carrier/non-carrier diplotype candidates. | Confirm the split across populations or batches and calibrate it against a within-diplotype null before describing it as stable. | A supported subdivision candidate identifies information potentially missing from the hash and tells us where direct SV measurement adds resolution. |
+| Does the same SV allele occur on multiple divergent haplotype backgrounds? | Stage 1 can emit multiple cluster associations, but later stages do not classify this pattern. | First resolve multiallelic/VNTR loci, then measure the number and divergence of carrier clusters and inspect sequence/read evidence. | A validated multi-background allele can indicate recurrent mutation, gene conversion, recombination, or an old allele; an unvalidated one often exposes call collapsing or representation error. |
+| Is a population-enriched SV carried on an otherwise cosmopolitan haplotype background? | Stage 7 joins Stage 4 classification to the population breadth of the top supported carrier cluster and emits a candidate flag. | Treat the flag as descriptive until adequate population and cluster support are confirmed. | This pattern is consistent with a relatively recent event that the older SNV-defined hash cannot resolve and is more informative than ancestry concordance alone. |
+
+Two complementary measurements anchor interpretation. The **SV-centric** view asks whether carriers
+of one resolved SV are concentrated in one or a few hash clusters or distributed across many clusters.
+The **cluster-centric** view asks whether members of one hash cluster are homogeneous for SV carriage
+or split into carriers and non-carriers. Haploblocks are sufficient SV tags where both concentration
+and within-cluster purity are high. Direct SV measurement adds information where the same SV spans
+many clusters or where SV presence repeatedly subdivides a cluster. Population labels are used to
+control stratification and describe whether these patterns are shared or population-restricted; they
+are not an alternative SV-prediction model.
+
+This framing makes Stages 1, 4, 6, and 7 the core representation audit. Stage 8 interprets the most
+credible captured and missed variants. Boundary and per-block count enrichment (Stages 2, 3, and 5)
+remain optional side questions unless they produce a specific mechanistic hypothesis.
 
 ## Original hackathon development plan (historical)
 
@@ -68,6 +93,8 @@ The planned Stage 0 will use sample merging followed by `truvari collapse`. It s
 
 Stage 0 owns representation-level QC: reconciling equivalent calls, deduplicating them, and applying any cohort-wide FILTER or size policy. Stage 1 preserves every record it receives and reports genotype/association QC without silently removing IMPRECISE calls or particular SV types. Analysis-specific size or confidence subsets belong in the downstream analysis that requests them.
 
+**Why we care:** an apparent SV on several haplotype backgrounds is biologically interesting only after Stage 0 has shown that it is one comparable allele rather than several repeat alleles or collapsed call representations.
+
 For the hackathon, Stage 1 starts from the existing pre-merged VCF at `input/1kgp_ont_cohort.postfilter.full.vcf.gz`. That file was produced previously using:
 
 1. Sniffles SV calling
@@ -98,6 +125,8 @@ The default output directory is `claude-first-prototype/stage1_output/`. Chromos
 
 All paths are registered in `stage1_output/config.yaml`. Population labels remain independent of cluster inference: pass the Stage 0 table with `--sample-metadata` to normalize and publish it for Stages 4, 6, and 7. Useful method diagnostics are kept under `debug_and_qc/`; downloaded cluster files remain temporary and are removed after a successful run.
 
+**Why we care:** Stage 1 creates the auditable allele-to-cluster mapping needed to ask whether the hash tags an SV, misses it within a cluster, or places the same resolved allele on several backgrounds.
+
 The table keys and row meanings are part of the contract:
 
 | Path key | One row per | Required identity columns |
@@ -117,8 +146,8 @@ The supplied `sample_metadata` table must provide `sample_id` and `population`. 
 | 4 | `sv_genotypes` and `sample_metadata`; classify every `sv_record_id` once, before any haploblock join |
 | 5 | `sv_block_summary` and `haploblocks`; count unique `sv_record_id, haploblock_id` pairs |
 | 6 | `sv_genotypes`, `sv_block_summary`, `cluster_memberships`, and `sample_metadata`; test every record against every cluster in each overlapped block, including clusters that do not pass Stage 1's association threshold |
-| 7 | `sv_genotypes`, `sv_block_summary`, `cluster_memberships`, and `sample_metadata`; measure information gained by the local diplotype for every record–block pair |
-| 8 | Stage 6 `sv_cluster_summary`, optional Stage 4 classifications, and the registered GTF; annotate one prioritized record–block candidate per Stage 6 summary row |
+| 7 | `sv_genotypes`, `sv_block_summary`, `sv_to_clusters`, `cluster_memberships`, `sample_metadata`, and optional Stage 4 classification; measure carrier-cluster concentration and hash-group purity |
+| 8 | Stage 6 `sv_cluster_summary`, Stage 7 `sv_hash_representation`, optional Stage 4 classifications, and the registered GTF; annotate one record–block candidate per Stage 6 summary row |
 
 Use `sv_to_clusters` when the question is “which clusters pass the Stage 1 association rule for this SV?” It is intentionally thresholded and may contain several rows for a record. Use `sv_block_summary` with the distinct cluster IDs from `cluster_memberships` when the question is “which clusters could contain this SV?” That join preserves every overlapping record–block pair and every cluster defined in the block; it is the candidate universe used by Stages 6 and 7. Use `sv_genotypes` alone when every original VCF record must be retained independently of haploblock overlap or cluster assignment.
 
@@ -152,7 +181,7 @@ For heterozygous samples, the VCF phase is not assumed to match the cluster-gene
 
 ## Optional Stage 2: boundary classification
 
-`pipeline/stage2_intersect.py` remains available for the separate descriptive boundary question. `position_class` uses exact overlap count: zero blocks is `outside_block`, one is `within_block`, and two or more is `boundary_crossing`. Proximity is retained separately as `near_boundary`, using `boundary_distance_bp`; a nearby SV is not mislabeled as crossing. It reads Stage 1's generated config:
+`pipeline/stage2_intersect.py` remains available for the separate descriptive boundary question. `position_class` uses exact overlap count: zero blocks is `outside_block`, one is `within_block`, and two or more is `boundary_crossing`. Proximity is retained separately as `near_boundary`, using `boundary_distance_bp`; a nearby SV is not mislabeled as crossing. It reuses Stage 1's `sv_genotypes` metadata tables, avoiding a second scan of the VCF, and reads Stage 1's generated config:
 
 ```bash
 python claude-first-prototype/pipeline/stage2_intersect.py \
@@ -160,6 +189,8 @@ python claude-first-prototype/pipeline/stage2_intersect.py \
 ```
 
 This analysis is not required to establish cluster association. Because published blocks are contiguous regions, boundary results should be treated as a distinct spatial analysis rather than evidence that an SV belongs to a cluster.
+
+**Why we care:** boundary-crossing events may reveal loci where the fixed block representation is structurally inappropriate, but this result does not by itself show that hashes improve SV prediction.
 
 ## Current Stage 4: population allele-frequency classification
 
@@ -171,6 +202,8 @@ python claude-first-prototype/pipeline/stage4_classify_af.py \
 ```
 
 The stage writes `sv_af_classification.tsv` with one row per SV and population, `sv_classification.tsv` with one row per SV, and a `config.yaml` that carries the Stage 1 paths forward. Stage 6 can join the one-row-per-SV classification to `sv_block_summary` and independently compare it with `cluster_memberships`.
+
+**Why we care:** population frequency is principally a control, but when joined to cluster prevalence it can distinguish ordinary ancestry structure from a population-enriched SV arising on an otherwise widespread haplotype background.
 
 ## Current Stage 5: per-haploblock SV-type enrichment
 
@@ -185,6 +218,8 @@ The output `stage5_output/sv_type_enrichment.tsv` contains observed and expected
 
 This is deliberately a readable first model with haploblock length as its only exposure adjustment. SNP density, callability, overdispersion, and minimum-count policies should be evaluated before treating significant cells as final biological results.
 
+**Why we care:** a reproducible excess of one SV mechanism in a block could identify local sequence architecture that generates structural mutation, but it is optional because it does not directly test whether genomic hashes capture SV alleles.
+
 ## Rescoped Stage 6: population-conditioned SV–cluster association
 
 `pipeline/stage6_cluster_association.py` evaluates each local cluster for every overlapping
@@ -192,7 +227,21 @@ SV–haploblock pair. It removes population means from cluster dosage and SV dos
 their association, then permutes SV genotypes within populations for an empirical null. This asks
 whether the local hash contains information beyond population allele-frequency differences. The
 outputs retain all tested cluster associations and a one-row-per-SV–block summary that distinguishes
-portable, population-dependent, and other detected associations.
+cross-population-consistent tag candidates, population-dependent associations, exclusion signals,
+and other detected associations.
+
+The association table reports the number of called samples carrying each cluster, the SV carrier and
+non-carrier counts among those samples, the carrier-rate difference, and whether the cluster is
+carrier-enriched or carrier-depleted. Depleted clusters remain useful exclusion evidence but are not
+reported as carrier tags.
+
+**Why we care:** a cluster showing the same SV association across represented populations is a candidate portable tag, whereas an ancestry-only association is not.
+
+The current implementation uses a per-SV–block maximum-statistic permutation and reports positive
+carrier tags separately from negative exclusion signals. Pairs passing the screening permutation
+threshold receive an independent higher-resolution refinement run before pair-level FDR correction.
+Population sign consistency remains an in-sample candidate screen rather than proof of portability;
+sequencing-batch constraints and leave-one-population-out validation remain future refinements.
 
 Run Stage 6 with Stage 4's carried-forward config when population classifications should remain
 available to Stage 8:
@@ -202,7 +251,7 @@ python claude-first-prototype/pipeline/stage6_cluster_association.py \
   --config claude-first-prototype/stage4_output/config.yaml
 ```
 
-## Rescoped Stage 7: haploblock information gain and PCA QC
+## Rescoped Stage 7: hash representation audit and PCA QC
 
 `pipeline/stage7_information_gain.py` measures how much local diplotype reduces uncertainty about
 each SV and how often well-represented diplotypes contain both carriers and non-carriers. The first
@@ -210,21 +259,58 @@ quantity identifies SVs that are well tagged by existing hashes; the second iden
 that add local information missing from those hashes. It also writes reusable PCA coordinate and
 variance tables plus a population- and superpopulation-colored QC plot.
 
+**Why we care:** Stage 7 is the direct “are haploblocks sufficient for SVs?” test: it measures whether each SV is concentrated in a small number of clusters and whether each cluster is internally homogeneous for SV carriage.
+
+Raw in-sample information gain is not sufficient for that decision. The next revision should report
+two directly interpretable quantities: carrier concentration across distinct clusters for each
+resolved SV, and carrier/non-carrier purity among samples with each sufficiently represented cluster.
+Because the VCF phase is not linked to the hash haplotype labels, a subdivision candidate is emitted
+only when the same complete hash diplotype contains a configured minimum number of both carriers and
+non-carriers. This is a count-supported candidate, not a replication result. Minimum
+carrier/non-carrier counts, population- and batch-conditioned nulls, and resampling stability are
+needed so rare calls or technical effects are not mistaken for hash failure. It should also flag
+population-enriched SVs restricted within otherwise cosmopolitan clusters. PCA remains
+batch/ancestry QC and is not evidence that the hash representation resolves SVs.
+
+The proposed primary fields are `n_supported_carrier_clusters`, the fraction of supported carrier
+evidence assigned to the top cluster, an effective carrier-cluster count derived from that evidence,
+and per-cluster callable carrier/non-carrier counts and sample-level co-carriage purity. The
+SV-centric concentration fields use Stage 1's allele-assignment evidence rather than counting both
+haplotypes of every unphased carrier. Raw
+information gain can remain a secondary descriptive column if its finite-sample limitations are
+reported.
+
+All-evidence concentration fields are diagnostic. Representation categories and population-context
+flags use the separate standard-evidence top cluster, share, and effective cluster count so sparse
+low-evidence assignments cannot create definitive multi-cluster or shared-background candidates.
+
 ```bash
 python claude-first-prototype/pipeline/stage7_information_gain.py \
-  --config claude-first-prototype/stage1_output/config.yaml
+  --config claude-first-prototype/stage6_output/config.yaml
 ```
+
+The primary outputs are `sv_carrier_cluster_summary.tsv`, `sv_cluster_purity.tsv`, and
+`sv_hash_representation.tsv`. The existing `sv_haploblock_information.tsv` is retained as a secondary
+description, and the PCA files remain QC outputs.
 
 ## Rescoped Stage 8: consequence-aware candidate annotation
 
-`pipeline/stage8_candidate_annotation.py` joins Stage 6 candidates to the GTF registered by Stage 1 (or an optional `--gtf` override) and labels
+`pipeline/stage8_candidate_annotation.py` joins Stage 6 candidates and Stage 7 representation patterns to the GTF registered by Stage 1 (or an optional `--gtf` override) and labels
 consequences according to SV type. In particular, inversion breakpoint disruption is kept distinct
-from genes merely contained in an inverted span. The candidate score combines explicit association,
-annotation, and call-quality components for triage and is not interpreted as evidence of causality.
+from genes merely contained in an inverted span. Association, representation, consequence, and
+call-quality fields remain separate rather than being combined into a candidate score.
+
+**Why we care:** Stage 8 adds gene, exon, and breakpoint context to the clearest examples of SVs captured or missed by the hash so those representation patterns can be interpreted at named loci.
+
+Stage 8 should preserve the representation category—cross-population tag candidate, count-supported
+hash-subdivision candidate, multi-cluster SV candidate, or population-enriched event on a shared
+background—as a separate
+field. Association, call quality, and functional annotation should remain separate evidence layers
+rather than being collapsed into a single biological-importance score.
 
 ```bash
 python claude-first-prototype/pipeline/stage8_candidate_annotation.py \
-  --config claude-first-prototype/stage6_output/config.yaml
+  --config claude-first-prototype/stage7_output/config.yaml
 ```
 
 ## Current testing status

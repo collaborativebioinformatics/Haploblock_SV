@@ -25,18 +25,22 @@ from sv_contract import METADATA_COLUMNS
 ASSOCIATION_COLUMNS = [
     *METADATA_COLUMNS,
     "haploblock_id", "cluster_id", "n_called", "n_cluster_carriers",
-    "cluster_haplotype_count", "carrier_rate_with_cluster",
-    "carrier_rate_without_cluster", "population_adjusted_r", "p_value",
-    "q_value", "informative_populations", "directional_consistency",
+    "n_samples_with_cluster", "n_sv_carriers_with_cluster",
+    "n_sv_noncarriers_with_cluster", "cluster_haplotype_count",
+    "carrier_rate_with_cluster", "carrier_rate_without_cluster",
+    "carrier_rate_difference", "association_direction",
+    "population_adjusted_r", "p_value", "q_value", "permutations_used",
+    "informative_populations", "directional_consistency",
 ]
 
 
 def dosage_table(sv: pd.DataFrame, samples: list[str]) -> pd.DataFrame:
     result = sv[METADATA_COLUMNS].copy()
+    dosage_columns = {}
     for sample in samples:
         alternate, called = genotype_counts(sv[sample])
-        result[sample] = np.where(called > 0, alternate, np.nan)
-    return result
+        dosage_columns[sample] = np.where(called > 0, alternate, np.nan)
+    return pd.concat([result, pd.DataFrame(dosage_columns)], axis=1)
 
 
 def centered(values: np.ndarray, populations: np.ndarray) -> np.ndarray:
@@ -76,25 +80,63 @@ def population_consistency(
     return len(effects), float(consistency)
 
 
-def empirical_p_value(
-    x: np.ndarray,
+def max_statistic_p_values(
+    cluster_vectors: dict[str, np.ndarray],
     y: np.ndarray,
     populations: np.ndarray,
-    observed: float,
+    observed: dict[str, float],
     permutations: int,
     rng: np.random.Generator,
-) -> float:
-    if not np.isfinite(observed):
-        return 1.0
-    exceedances = 0
-    shuffled = y.copy()
-    for _ in range(permutations):
-        for population in np.unique(populations):
-            use = np.flatnonzero(populations == population)
-            shuffled[use] = rng.permutation(y[use])
-        permuted = correlation(x, shuffled, populations)
-        exceedances += np.isfinite(permuted) and abs(permuted) >= abs(observed)
-    return (exceedances + 1) / (permutations + 1)
+) -> tuple[dict[str, float], int]:
+    """Family-wise p-values using the largest cluster statistic per permutation."""
+    finite_observed = [abs(value) for value in observed.values() if np.isfinite(value)]
+    if not finite_observed:
+        return {cluster_id: 1.0 for cluster_id in observed}, 0
+    maxima = np.zeros(permutations, dtype=float)
+    cluster_matrix = np.column_stack(list(cluster_vectors.values())).astype(float)
+    y_residual = centered(y, populations)
+    for population in np.unique(populations):
+        use = populations == population
+        cluster_matrix[use] -= cluster_matrix[use].mean(axis=0)
+    cluster_norms = np.sqrt(np.sum(cluster_matrix**2, axis=0))
+    population_indices = [
+        np.flatnonzero(populations == population) for population in np.unique(populations)
+    ]
+    chunk_size = 1000
+    for start in range(0, permutations, chunk_size):
+        width = min(chunk_size, permutations - start)
+        shuffled = np.empty((len(y), width), dtype=float)
+        for indices in population_indices:
+            values = np.repeat(y_residual[indices, None], width, axis=1)
+            shuffled[indices] = rng.permuted(values, axis=0)
+        y_norms = np.sqrt(np.sum(shuffled**2, axis=0))
+        denominators = cluster_norms[:, None] * y_norms[None, :]
+        correlations = np.divide(
+            cluster_matrix.T @ shuffled,
+            denominators,
+            out=np.full_like(denominators, np.nan),
+            where=denominators > 0,
+        )
+        maxima[start:start + width] = np.nanmax(np.abs(correlations), axis=0)
+    return {
+        cluster_id: (
+            float((np.sum(maxima >= abs(value)) + 1) / (permutations + 1))
+            if np.isfinite(value) else 1.0
+        )
+        for cluster_id, value in observed.items()
+    }, permutations
+
+
+def assign_pair_q_values(associations: pd.DataFrame) -> pd.DataFrame:
+    """Correct one maximum-statistic p-value per SV–block pair."""
+    if associations.empty:
+        return associations
+    keys = ["sv_record_id", "haploblock_id"]
+    pair_tests = associations.groupby(keys, as_index=False)["p_value"].min()
+    pair_tests["q_value"] = benjamini_hochberg(pair_tests["p_value"].to_numpy())
+    return associations.drop(columns="q_value", errors="ignore").merge(
+        pair_tests[keys + ["q_value"]], on=keys, how="left"
+    )
 
 
 def association_table(
@@ -106,6 +148,8 @@ def association_table(
     seed: int,
     min_cluster_haplotypes: int,
     min_population_samples: int,
+    refinement_permutations: int | None = None,
+    refinement_p_threshold: float = 0.01,
 ) -> pd.DataFrame:
     samples = [
         sample for sample in metadata["sample_id"].astype(str)
@@ -137,42 +181,80 @@ def association_table(
             if key not in dosages.index:
                 continue
             variant = dosages.loc[key]
+            called_samples = [
+                sample for sample in cluster_dosage.index
+                if sample in samples and pd.notna(variant[sample])
+            ]
+            if len(called_samples) < 4:
+                continue
+            y = variant[called_samples].to_numpy(dtype=float)
+            populations = np.array([population_by_sample[sample] for sample in called_samples])
+            if len(np.unique(y)) < 2:
+                continue
+            cluster_vectors = {}
             for cluster_id in cluster_dosage.columns:
-                cluster_samples = cluster_dosage.index[cluster_dosage[cluster_id] > 0]
                 if int(cluster_dosage[cluster_id].sum()) < min_cluster_haplotypes:
                     continue
-                called_samples = [
-                    sample for sample in cluster_dosage.index
-                    if sample in samples and pd.notna(variant[sample])
-                ]
-                if len(called_samples) < 4:
-                    continue
                 x = cluster_dosage.loc[called_samples, cluster_id].to_numpy(dtype=float)
-                y = variant[called_samples].to_numpy(dtype=float)
-                populations = np.array([population_by_sample[sample] for sample in called_samples])
-                if len(np.unique(x)) < 2 or len(np.unique(y)) < 2:
+                if len(np.unique(x)) < 2:
                     continue
-                adjusted_r = correlation(x, y, populations)
-                p_value = empirical_p_value(
-                    x, y, populations, adjusted_r, permutations, rng
+                cluster_vectors[cluster_id] = x
+            observed = {
+                cluster_id: correlation(x, y, populations)
+                for cluster_id, x in cluster_vectors.items()
+            }
+            if not observed:
+                continue
+            p_values, permutations_used = max_statistic_p_values(
+                cluster_vectors, y, populations, observed, permutations, rng
+            )
+            if (
+                refinement_permutations is not None
+                and refinement_permutations > permutations
+                and min(p_values.values()) <= refinement_p_threshold
+            ):
+                # The refinement draws are independent and replace, rather than
+                # reuse, the screening p-value selected in the first pass.
+                p_values, permutations_used = max_statistic_p_values(
+                    cluster_vectors, y, populations, observed,
+                    refinement_permutations, rng,
                 )
+            for cluster_id, x in cluster_vectors.items():
+                adjusted_r = observed[cluster_id]
                 informative, consistency = population_consistency(
                     x, y, populations, adjusted_r, min_population_samples
                 )
                 with_cluster = y[x > 0] > 0
                 without_cluster = y[x == 0] > 0
+                rate_with = float(with_cluster.mean())
+                rate_without = float(without_cluster.mean())
+                rate_difference = rate_with - rate_without
+                if rate_difference > 0:
+                    direction = "carrier_enriched"
+                elif rate_difference < 0:
+                    direction = "carrier_depleted"
+                else:
+                    direction = "no_difference"
                 rows.append(
                     {
                         **{column: variant[column] for column in METADATA_COLUMNS},
                         "haploblock_id": block_id,
                         "cluster_id": cluster_id,
                         "n_called": len(called_samples),
-                        "n_cluster_carriers": len(cluster_samples.intersection(called_samples)),
+                        # Retained for compatibility; this historically counted called
+                        # samples carrying the cluster, not SV carriers.
+                        "n_cluster_carriers": int((x > 0).sum()),
+                        "n_samples_with_cluster": int((x > 0).sum()),
+                        "n_sv_carriers_with_cluster": int(with_cluster.sum()),
+                        "n_sv_noncarriers_with_cluster": int((~with_cluster).sum()),
                         "cluster_haplotype_count": int(x.sum()),
-                        "carrier_rate_with_cluster": float(with_cluster.mean()),
-                        "carrier_rate_without_cluster": float(without_cluster.mean()),
+                        "carrier_rate_with_cluster": rate_with,
+                        "carrier_rate_without_cluster": rate_without,
+                        "carrier_rate_difference": rate_difference,
+                        "association_direction": direction,
                         "population_adjusted_r": adjusted_r,
-                        "p_value": p_value,
+                        "p_value": p_values[cluster_id],
+                        "permutations_used": permutations_used,
                         "informative_populations": informative,
                         "directional_consistency": consistency,
                     }
@@ -180,8 +262,7 @@ def association_table(
 
     if not rows:
         return pd.DataFrame(columns=ASSOCIATION_COLUMNS)
-    result = pd.DataFrame(rows)
-    result["q_value"] = benjamini_hochberg(result["p_value"].to_numpy())
+    result = assign_pair_q_values(pd.DataFrame(rows))
     return result[ASSOCIATION_COLUMNS].sort_values(
         ["q_value", "population_adjusted_r"], ascending=[True, False]
     ).reset_index(drop=True)
@@ -195,34 +276,64 @@ def summarize_associations(
     if associations.empty:
         return pd.DataFrame(columns=[
             "sv_id", "haploblock_id", "best_cluster_id", "association_pattern",
+            "best_enriched_cluster_id", "best_depleted_cluster_id",
+            "association_direction", "carrier_rate_difference",
             "population_adjusted_r", "q_value", "informative_populations",
             "directional_consistency",
         ])
+    keys = ["sv_record_id", "haploblock_id"]
+    ranked = associations.assign(abs_r=associations["population_adjusted_r"].abs())
     best = (
-        associations.assign(abs_r=associations["population_adjusted_r"].abs())
-        .sort_values(["q_value", "abs_r"], ascending=[True, False])
+        ranked.sort_values(["q_value", "p_value", "abs_r"], ascending=[True, True, False])
         .drop_duplicates(["sv_record_id", "haploblock_id"])
         .copy()
     )
+    enriched_ids = (
+        ranked[ranked["association_direction"] == "carrier_enriched"]
+        .sort_values(["p_value", "population_adjusted_r"], ascending=[True, False])
+        .drop_duplicates(keys)[keys + ["cluster_id"]]
+        .rename(columns={"cluster_id": "best_enriched_cluster_id"})
+    )
+    depleted_ids = (
+        ranked[ranked["association_direction"] == "carrier_depleted"]
+        .sort_values(["p_value", "population_adjusted_r"], ascending=[True, True])
+        .drop_duplicates(keys)[keys + ["cluster_id"]]
+        .rename(columns={"cluster_id": "best_depleted_cluster_id"})
+    )
+    best = best.merge(enriched_ids, on=keys, how="left").merge(
+        depleted_ids, on=keys, how="left"
+    )
     significant = (best["q_value"] < q_threshold) & (best["abs_r"] >= min_abs_r)
+    enriched = significant & best["association_direction"].eq("carrier_enriched")
     portable = (
-        significant
+        enriched
         & (best["informative_populations"] >= 2)
         & (best["directional_consistency"] >= 0.75)
     )
-    dependent = significant & (best["informative_populations"] >= 2) & ~portable
+    dependent = enriched & (best["informative_populations"] >= 2) & ~portable
     best["association_pattern"] = "no_detected_cluster_signal"
-    best.loc[significant, "association_pattern"] = "cluster_associated"
+    best.loc[significant & ~enriched, "association_pattern"] = "cluster_exclusion_signal"
+    best.loc[enriched, "association_pattern"] = "cluster_associated"
     best.loc[dependent, "association_pattern"] = "population_dependent_association"
-    best.loc[portable, "association_pattern"] = "portable_cluster_tag"
-    return best.rename(columns={"cluster_id": "best_cluster_id"}).drop(columns="abs_r")
+    best.loc[portable, "association_pattern"] = "cross_population_consistent_tag_candidate"
+    return best.rename(columns={"cluster_id": "best_cluster_id"}).drop(
+        columns="abs_r"
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, default=Path("stage6_output"))
-    parser.add_argument("--permutations", type=int, default=1000)
+    parser.add_argument(
+        "--permutations", type=int, default=10000,
+        help="Screening maximum-statistic permutations per SV–block.",
+    )
+    parser.add_argument(
+        "--refinement-permutations", type=int, default=1000000,
+        help="Independent permutations for pairs passing the refinement threshold.",
+    )
+    parser.add_argument("--refinement-p-threshold", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--min-cluster-haplotypes", type=int, default=6)
     parser.add_argument("--min-population-samples", type=int, default=4)
@@ -249,11 +360,12 @@ def main(argv: list[str] | None = None) -> None:
             association_table(
                 sv, sv_blocks, memberships, metadata, args.permutations, args.seed,
                 args.min_cluster_haplotypes, args.min_population_samples,
+                args.refinement_permutations, args.refinement_p_threshold,
             )
         )
     associations = pd.concat(all_associations, ignore_index=True)
     if not associations.empty:
-        associations["q_value"] = benjamini_hochberg(associations["p_value"].to_numpy())
+        associations = assign_pair_q_values(associations)
     summary = summarize_associations(associations, args.q_threshold, args.min_abs_r)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     association_path = args.out_dir / "sv_cluster_associations.tsv"

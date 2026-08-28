@@ -42,6 +42,94 @@ def test_information_gain_distinguishes_tagged_and_cluster_subdividing_svs() -> 
     assert result.loc["mixed", "normalized_information_gain"] == 0.0
     assert result.loc["mixed", "mixed_diplotype_fraction"] == 1.0
 
+    assignments = pd.DataFrame([{
+        **{column: tagged[column] for column in stage7_information_gain.METADATA_COLUMNS},
+        "haploblock_id": "block", "cluster_id": "C1",
+        "expected_alt_haplotypes": 8.0, "evidence_tier": "standard",
+    }])
+    carrier_clusters = stage7_information_gain.carrier_cluster_summary(assignments)
+    purity = stage7_information_gain.cluster_purity_table(
+        sv, blocks, memberships, samples, min_cluster_samples=4,
+        min_carriers=3, min_noncarriers=3,
+    )
+    representation = stage7_information_gain.representation_summary(
+        carrier_clusters, purity, result.reset_index(), purity_threshold=0.9
+    ).set_index("sv_id")
+    assert representation.loc["tagged", "n_supported_carrier_clusters"] == 1
+    assert representation.loc["tagged", "top_cluster_carrier_evidence_share"] == 1.0
+    assert representation.loc["tagged", "representation_pattern"] == "hash_tag_candidate"
+    assert representation.loc["mixed", "n_mixed_diplotypes_meeting_count_threshold"] == 2
+    assert representation.loc["mixed", "representation_pattern"] == "hash_subdivision_candidate"
+
+
+def test_carrier_cluster_summary_detects_multi_cluster_sv() -> None:
+    base = {
+        "sv_record_id": "record_multi", "sv_id": "multi", "chrom": "chr1",
+        "start": 100, "end": 110, "sv_type": "INS", "length": 10,
+        "filter": "PASS", "imprecise": False, "haploblock_id": "block",
+        "evidence_tier": "standard",
+    }
+    assignments = pd.DataFrame([
+        {**base, "cluster_id": "C1", "expected_alt_haplotypes": 6.0},
+        {**base, "cluster_id": "C2", "expected_alt_haplotypes": 2.0},
+    ])
+    summary = stage7_information_gain.carrier_cluster_summary(assignments).iloc[0]
+    assert summary["n_supported_carrier_clusters"] == 2
+    assert summary["top_cluster_carrier_evidence_share"] == 0.75
+    assert summary["effective_carrier_cluster_count"] == 1.6
+
+    mixed_evidence = assignments.copy()
+    mixed_evidence.loc[mixed_evidence["cluster_id"] == "C1", "evidence_tier"] = "low"
+    mixed_summary = stage7_information_gain.carrier_cluster_summary(mixed_evidence).iloc[0]
+    assert mixed_summary["top_supported_cluster_id"] == "C1"
+    assert mixed_summary["top_standard_evidence_cluster_id"] == "C2"
+
+    representation = stage7_information_gain.representation_summary(
+        stage7_information_gain.carrier_cluster_summary(
+            assignments.assign(evidence_tier="low")
+        ),
+        pd.DataFrame(), pd.DataFrame(), 0.9,
+    ).iloc[0]
+    assert representation["n_supported_carrier_clusters"] == 2
+    assert representation["n_standard_evidence_carrier_clusters"] == 0
+    assert representation["representation_pattern"] == "insufficient_or_partial_evidence"
+
+
+def test_population_specific_sv_on_shared_cluster_is_flagged() -> None:
+    metadata = {
+        "sv_record_id": "record", "sv_id": "v", "chrom": "chr1", "start": 1,
+        "end": 2, "sv_type": "INS", "length": 1, "filter": "PASS", "imprecise": False,
+    }
+    carrier_clusters = pd.DataFrame([{
+        **metadata, "haploblock_id": "block", "n_supported_carrier_clusters": 1,
+        "n_standard_evidence_carrier_clusters": 1, "top_supported_cluster_id": "C1",
+        "top_cluster_carrier_evidence_share": 1.0, "effective_carrier_cluster_count": 1.0,
+        "top_standard_evidence_cluster_id": "C1",
+        "top_standard_cluster_carrier_evidence_share": 1.0,
+        "effective_standard_carrier_cluster_count": 1.0,
+    }])
+    purity = pd.DataFrame([{
+        **metadata, "haploblock_id": "block", "cluster_id": "C1",
+        "n_called_cluster_samples": 10, "n_sv_carriers": 10, "n_sv_noncarriers": 0,
+        "carrier_rate_in_cluster": 1.0, "cluster_purity": 1.0, "mixed_balance": 0.0,
+        "meets_mixed_count_threshold": False,
+    }])
+    cluster_populations = pd.DataFrame([{
+        "haploblock_id": "block", "cluster_id": "C1",
+        "cluster_population_count": 3, "cluster_populations": "A;B;C",
+    }])
+    classifications = pd.DataFrame([{
+        "sv_record_id": "record", "sv_class": "population_specific",
+        "specific_to_population": "A",
+    }])
+    result = stage7_information_gain.representation_summary(
+        carrier_clusters, purity, pd.DataFrame(), 0.9,
+        cluster_populations, classifications, 3,
+    ).iloc[0]
+    assert result["population_context_pattern"] == (
+        "population_enriched_on_shared_cluster_candidate"
+    )
+
 
 def test_pca_writes_reusable_deterministic_tables() -> None:
     samples = ["S1", "S2", "S3", "S4"]
