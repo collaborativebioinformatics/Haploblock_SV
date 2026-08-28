@@ -9,13 +9,15 @@ import hashlib
 import json
 import logging
 import math
+import multiprocessing
 import re
 import subprocess
 import threading
 import time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +38,7 @@ log = logging.getLogger("match_svs_to_clusters")
 
 _USE_SYSTEM_CURL = False
 _DOWNLOAD_CLIENT_LOCK = threading.Lock()
+_DOWNLOAD_SESSION = threading.local()
 
 DEFAULT_BASE_URL = "https://data.haploblocks.org/haploblock_hashes/1000G"
 ALL_CHROMS = [f"chr{number}" for number in range(1, 23)] + ["chrX"]
@@ -256,6 +259,16 @@ class BlockMembership:
     total_cluster_haplotypes: Counter[str]
 
 
+@dataclass
+class PreparedBlock:
+    membership: BlockMembership
+    sample_indices: np.ndarray
+    cluster_ids: list[str]
+    cluster0: np.ndarray
+    cluster1: np.ndarray
+    represented_counts: np.ndarray
+
+
 def download_with_system_curl(url: str, timeout: int) -> bytes:
     """Download with the OS HTTPS client, which trusts the macOS keychain."""
     result = subprocess.run(
@@ -277,7 +290,11 @@ def request_with_retries(url: str, retries: int, timeout: int = 60) -> bytes:
                 use_system_curl = _USE_SYSTEM_CURL
             if use_system_curl:
                 return download_with_system_curl(url, timeout)
-            response = requests.get(url, timeout=timeout)
+            session = getattr(_DOWNLOAD_SESSION, "session", None)
+            if session is None:
+                session = requests.Session()
+                _DOWNLOAD_SESSION.session = session
+            response = session.get(url, timeout=timeout)
             response.raise_for_status()
             return response.content
         except requests.RequestException as exc:
@@ -317,6 +334,12 @@ def parse_cluster_filename(path_or_name: str | Path) -> tuple[str, int, int]:
     return match.group(1), int(match.group(2)), int(match.group(3))
 
 
+def cluster_cache_directory(out_dir: Path, base_url: str, chrom: str) -> Path:
+    normalized_url = base_url.rstrip("/")
+    source_id = hashlib.sha256(normalized_url.encode()).hexdigest()[:16]
+    return out_dir / "_intermediate" / "clusters" / source_id / chrom
+
+
 def prepare_cluster_files(
     chrom: str,
     base_url: str,
@@ -329,7 +352,13 @@ def prepare_cluster_files(
         paths = sorted(cluster_dir.glob(f"{chrom}_*-*_cluster.tsv"), key=parse_cluster_filename)
         if not paths:
             raise ValueError(f"No {chrom} cluster files found in {cluster_dir}")
-        return paths, {"source": "local", "discovered": len(paths), "downloaded": 0, "reused": len(paths)}
+        return paths, {
+            "source": "local",
+            "directory": str(cluster_dir.resolve()),
+            "discovered": len(paths),
+            "downloaded": 0,
+            "reused": len(paths),
+        }
 
     names = discover_cluster_filenames(base_url, chrom, retries)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -362,6 +391,8 @@ def prepare_cluster_files(
     paths = sorted((cache_dir / name for name in names), key=parse_cluster_filename)
     return paths, {
         "source": "download",
+        "base_url": base_url.rstrip("/"),
+        "cache_dir": str(cache_dir.resolve()),
         "discovered": len(names),
         "downloaded": len(pending),
         "reused": len(reused),
@@ -451,10 +482,11 @@ def load_block_membership(
     )
 
 
+@cache
 def genotype_dosage(genotype: str) -> int | None:
     if "." in genotype:
         return None
-    alleles = re.split(r"[|/]", genotype)
+    alleles = genotype.replace("|", "/").split("/")
     return sum(int(allele) != 0 for allele in alleles)
 
 
@@ -514,12 +546,6 @@ def fit_cluster_probabilities(
     return probabilities, expected_counts, converged, iterations
 
 
-def heterozygote_posterior(probability0: float, probability1: float) -> float:
-    numerator = probability0 * (1 - probability1)
-    denominator = numerator + (1 - probability0) * probability1
-    return numerator / denominator if denominator > 0 else 0.5
-
-
 def wilson_interval(probability: float, count: int) -> tuple[float, float]:
     if count == 0 or math.isnan(probability):
         return math.nan, math.nan
@@ -530,147 +556,192 @@ def wilson_interval(probability: float, count: int) -> tuple[float, float]:
     return max(0.0, center - margin), min(1.0, center + margin)
 
 
-def infer_sv_block(
-    record: SVRecord,
-    samples: list[str],
-    block: BlockMembership,
-    association_threshold: float,
-    posterior_threshold: float,
-    max_iterations: int,
-    tolerance: float,
-) -> dict:
-    sample_index = {sample: index for index, sample in enumerate(samples)}
+FRACTION_BIN_NAMES = ["[0,0.25)", "[0.25,0.5)", "[0.5,0.75)", "[0.75,1]", "missing"]
+
+
+def fraction_bin_counts(values: np.ndarray) -> np.ndarray:
+    missing = np.isnan(values)
+    present = values[~missing]
+    return np.asarray(
+        [
+            np.count_nonzero(present < 0.25),
+            np.count_nonzero((present >= 0.25) & (present < 0.5)),
+            np.count_nonzero((present >= 0.5) & (present < 0.75)),
+            np.count_nonzero(present >= 0.75),
+            np.count_nonzero(missing),
+        ],
+        dtype=np.int64,
+    )
+
+
+def prepare_block(block: BlockMembership, sample_index: dict[str, int]) -> PreparedBlock:
     paired_samples = [sample for sample in block.sample_clusters if sample in sample_index]
     cluster_ids = sorted(
         {cluster for sample in paired_samples for cluster in block.sample_clusters[sample]}
     )
     cluster_index = {cluster: index for index, cluster in enumerate(cluster_ids)}
-    represented_counts = np.zeros(len(cluster_ids), dtype=int)
-    callable_counts = np.zeros(len(cluster_ids), dtype=int)
-    callable_samples: list[str] = []
-    dosage_values: list[int] = []
-    cluster0_values: list[int] = []
-    cluster1_values: list[int] = []
+    cluster0 = np.fromiter(
+        (cluster_index[block.sample_clusters[sample][0]] for sample in paired_samples),
+        dtype=np.int32,
+    )
+    cluster1 = np.fromiter(
+        (cluster_index[block.sample_clusters[sample][1]] for sample in paired_samples),
+        dtype=np.int32,
+    )
+    represented_counts = np.bincount(
+        np.concatenate([cluster0, cluster1]), minlength=len(cluster_ids)
+    )
+    return PreparedBlock(
+        membership=block,
+        sample_indices=np.fromiter(
+            (sample_index[sample] for sample in paired_samples), dtype=np.int32
+        ),
+        cluster_ids=cluster_ids,
+        cluster0=cluster0,
+        cluster1=cluster1,
+        represented_counts=represented_counts,
+    )
 
-    for sample in paired_samples:
-        cluster0_id, cluster1_id = block.sample_clusters[sample]
-        cluster0_index = cluster_index[cluster0_id]
-        cluster1_index = cluster_index[cluster1_id]
-        represented_counts[cluster0_index] += 1
-        represented_counts[cluster1_index] += 1
-        dosage = int(record.dosages[sample_index[sample]])
-        if dosage < 0:
-            continue
-        callable_samples.append(sample)
-        dosage_values.append(dosage)
-        cluster0_values.append(cluster0_index)
-        cluster1_values.append(cluster1_index)
-        callable_counts[cluster0_index] += 1
-        callable_counts[cluster1_index] += 1
 
-    if dosage_values:
-        cluster0_array = np.asarray(cluster0_values, dtype=int)
-        cluster1_array = np.asarray(cluster1_values, dtype=int)
-        dosage_array = np.asarray(dosage_values, dtype=int)
+def infer_sv_block(
+    record: SVRecord,
+    block: PreparedBlock,
+    association_threshold: float,
+    posterior_threshold: float,
+    max_iterations: int,
+    tolerance: float,
+) -> dict:
+    dosage_values = record.dosages[block.sample_indices]
+    callable_mask = dosage_values >= 0
+    dosage_array = dosage_values[callable_mask]
+    cluster0_array = block.cluster0[callable_mask]
+    cluster1_array = block.cluster1[callable_mask]
+    n_clusters = len(block.cluster_ids)
+
+    if len(dosage_array):
         probabilities, expected_counts, converged, iterations = fit_cluster_probabilities(
             cluster0_array,
             cluster1_array,
             dosage_array,
-            len(cluster_ids),
+            n_clusters,
             max_iterations,
             tolerance,
         )
+        callable_counts = np.bincount(
+            np.concatenate([cluster0_array, cluster1_array]), minlength=n_clusters
+        )
     else:
-        cluster0_array = np.array([], dtype=int)
-        cluster1_array = np.array([], dtype=int)
-        dosage_array = np.array([], dtype=int)
-        probabilities = np.full(len(cluster_ids), np.nan)
-        expected_counts = np.zeros(len(cluster_ids))
+        probabilities = np.full(n_clusters, np.nan)
+        expected_counts = np.zeros(n_clusters)
+        callable_counts = np.zeros(n_clusters, dtype=int)
         converged = False
         iterations = 0
 
+    required_callable = np.minimum(3, block.represented_counts)
+    associated_mask = (
+        (block.represented_counts > 0)
+        & (callable_counts >= required_callable)
+        & ~np.isnan(probabilities)
+        & (probabilities >= association_threshold)
+    )
+    associated_indices = np.flatnonzero(associated_mask)
+    associated_ids = [block.cluster_ids[index] for index in associated_indices]
+    call_rates = np.divide(
+        callable_counts,
+        block.represented_counts,
+        out=np.full(n_clusters, np.nan),
+        where=block.represented_counts > 0,
+    )
     evidence = []
-    associated_ids = []
-    for cluster_id, index in cluster_index.items():
-        represented = int(represented_counts[index])
+    for index in associated_indices:
+        cluster_id = block.cluster_ids[index]
+        represented = int(block.represented_counts[index])
         callable_count = int(callable_counts[index])
-        required_callable = min(3, represented)
         probability = float(probabilities[index])
-        passes_minimum = represented > 0 and callable_count >= required_callable
-        associated = passes_minimum and not math.isnan(probability) and probability >= association_threshold
-        if associated:
-            associated_ids.append(cluster_id)
         ci_low, ci_high = wilson_interval(probability, callable_count)
         evidence.append(
             {
                 "cluster_id": cluster_id,
-                "cluster_haplotypes_total": block.total_cluster_haplotypes[cluster_id],
+                "cluster_haplotypes_total": block.membership.total_cluster_haplotypes[cluster_id],
                 "cluster_haplotypes_in_vcf": represented,
                 "callable_haplotypes": callable_count,
-                "required_callable_haplotypes": required_callable,
-                "call_rate": callable_count / represented if represented else math.nan,
+                "required_callable_haplotypes": int(required_callable[index]),
+                "call_rate": float(call_rates[index]),
                 "expected_alt_haplotypes": float(expected_counts[index]),
                 "sv_probability": probability,
                 "ci95_low": ci_low,
                 "ci95_high": ci_high,
-                "passes_min_callable": passes_minimum,
-                "is_associated": associated,
                 "evidence_tier": "low" if callable_count < 3 else "standard",
             }
         )
 
-    assignments = []
-    for sample, dosage, cluster0_index, cluster1_index in zip(
-        callable_samples, dosage_array, cluster0_array, cluster1_array
-    ):
-        if dosage != 1:
-            continue
-        cluster0_id = cluster_ids[int(cluster0_index)]
-        cluster1_id = cluster_ids[int(cluster1_index)]
-        if cluster0_id == cluster1_id:
-            posterior0 = 0.5
-            assigned_cluster = cluster0_id
-            confidence = 1.0
-            status = "same_cluster"
-        else:
-            posterior0 = heterozygote_posterior(
-                float(probabilities[int(cluster0_index)]),
-                float(probabilities[int(cluster1_index)]),
-            )
-            confidence = max(posterior0, 1 - posterior0)
-            if posterior0 >= posterior_threshold:
-                assigned_cluster = cluster0_id
-                status = "assigned"
-            elif 1 - posterior0 >= posterior_threshold:
-                assigned_cluster = cluster1_id
-                status = "assigned"
-            else:
-                assigned_cluster = ""
-                status = "ambiguous"
-        assignments.append(
-            {
-                "sample_id": sample,
-                "hap0_cluster_id": cluster0_id,
-                "hap1_cluster_id": cluster1_id,
-                "posterior_sv_on_hap0_cluster": posterior0,
-                "posterior_sv_on_hap1_cluster": 1 - posterior0,
-                "assigned_cluster_id": assigned_cluster,
-                "assignment_confidence": confidence,
-                "assignment_status": status,
-            }
+    assignment_counts = np.zeros(3, dtype=np.int64)
+    assignment_confidence_bins = np.zeros(len(FRACTION_BIN_NAMES), dtype=np.int64)
+    heterozygous = dosage_array == 1
+    heterozygous_cluster0 = cluster0_array[heterozygous]
+    heterozygous_cluster1 = cluster1_array[heterozygous]
+    same_cluster = heterozygous_cluster0 == heterozygous_cluster1
+    assignment_counts[0] = np.count_nonzero(same_cluster)
+    assignment_confidence_bins[3] = assignment_counts[0]
+    different_cluster0 = heterozygous_cluster0[~same_cluster]
+    different_cluster1 = heterozygous_cluster1[~same_cluster]
+    if len(different_cluster0):
+        p0 = probabilities[different_cluster0]
+        p1 = probabilities[different_cluster1]
+        numerator = p0 * (1 - p1)
+        denominator = numerator + (1 - p0) * p1
+        posterior0 = np.divide(
+            numerator,
+            denominator,
+            out=np.full_like(numerator, 0.5),
+            where=denominator > 0,
         )
+        confidence = np.maximum(posterior0, 1 - posterior0)
+        assigned = confidence >= posterior_threshold
+        assignment_counts[1] = np.count_nonzero(assigned)
+        assignment_counts[2] = len(assigned) - assignment_counts[1]
+        assignment_confidence_bins += fraction_bin_counts(confidence)
 
     association_class = "multiple" if len(associated_ids) > 1 else "single" if associated_ids else "zero"
     return {
         "evidence": evidence,
-        "assignments": assignments,
+        "clusters_evaluated": n_clusters,
+        "probability_bins": fraction_bin_counts(probabilities),
+        "call_rate_bins": fraction_bin_counts(call_rates),
+        "assignment_counts": assignment_counts,
+        "assignment_confidence_bins": assignment_confidence_bins,
         "associated_ids": associated_ids,
         "association_class": association_class,
-        "callable_samples": len(callable_samples),
+        "callable_samples": len(dosage_array),
         "heterozygous_samples": int(np.sum(dosage_array == 1)),
         "converged": converged,
         "iterations": iterations,
     }
+
+
+def evaluate_block(task: tuple) -> list[tuple[int, dict]]:
+    (
+        block,
+        indexed_records,
+        association_threshold,
+        posterior_threshold,
+        max_iterations,
+        tolerance,
+    ) = task
+    return [
+        (
+            record_index,
+            infer_sv_block(
+                record,
+                block,
+                association_threshold,
+                posterior_threshold,
+                max_iterations,
+                tolerance,
+            ),
+        )
+        for record_index, record in indexed_records
+    ]
 
 
 def write_results(
@@ -683,6 +754,7 @@ def write_results(
     max_iterations: int,
     tolerance: float,
     download_qc: dict,
+    workers: int,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     qc_dir = out_dir / "debug_and_qc"
@@ -701,6 +773,8 @@ def write_results(
         membership_rows_used += used_rows
 
     log.info("Loaded %d cluster blocks; evaluating overlapping SVs", len(blocks))
+    sample_index = {sample: index for index, sample in enumerate(samples)}
+    prepared_blocks = [prepare_block(block, sample_index) for block in blocks]
 
     haploblock_path = out_dir / f"haploblocks.{chrom}.tsv"
     with haploblock_path.open("w", newline="") as handle:
@@ -748,21 +822,22 @@ def write_results(
     cluster_evaluations = 0
     associated_cluster_rows = 0
     low_evidence_associations = 0
-    probability_bins: Counter[str] = Counter()
-    call_rate_bins: Counter[str] = Counter()
-    assignment_status_counts: Counter[str] = Counter()
-    assignment_confidence_bins: Counter[str] = Counter()
+    probability_bin_counts = np.zeros(len(FRACTION_BIN_NAMES), dtype=np.int64)
+    call_rate_bin_counts = np.zeros(len(FRACTION_BIN_NAMES), dtype=np.int64)
+    assignment_status_counts = np.zeros(3, dtype=np.int64)
+    assignment_confidence_bin_counts = np.zeros(len(FRACTION_BIN_NAMES), dtype=np.int64)
 
-    def fraction_bin(value: float) -> str:
-        if math.isnan(value):
-            return "missing"
-        if value < 0.25:
-            return "[0,0.25)"
-        if value < 0.5:
-            return "[0.25,0.5)"
-        if value < 0.75:
-            return "[0.5,0.75)"
-        return "[0.75,1]"
+    block_tasks = [
+        (
+            block,
+            [(int(index), records[int(index)]) for index in record_indices],
+            association_threshold,
+            posterior_threshold,
+            max_iterations,
+            tolerance,
+        )
+        for block, record_indices in zip(prepared_blocks, block_record_indices)
+    ]
 
     with (
         (out_dir / f"sv_to_clusters.{chrom}.tsv").open("w", newline="") as downstream_handle,
@@ -773,34 +848,54 @@ def write_results(
         downstream_writer.writeheader()
         summary_writer.writeheader()
 
-        for block, record_indices in zip(blocks, block_record_indices):
-            for record_index in record_indices:
-                record = records[int(record_index)]
-                result = infer_sv_block(
-                    record, samples, block, association_threshold, posterior_threshold, max_iterations, tolerance
+        if workers > 1 and len(block_tasks) > 1:
+            try:
+                executor = ProcessPoolExecutor(
+                    max_workers=min(workers, len(block_tasks)),
+                    mp_context=multiprocessing.get_context("spawn"),
                 )
-                sv_block_pairs += 1
-                association_counts[result["association_class"]] += 1
-                if result["callable_samples"] == 0:
-                    no_callable_pairs += 1
-                elif result["converged"]:
-                    converged_models += 1
-                else:
-                    nonconverged_models += 1
-                common = dict(zip(METADATA_COLUMNS, record.metadata))
-                common.update(
-                    {
-                        "haploblock_id": block.haploblock_id,
-                        "block_start": block.start,
-                        "block_end": block.end,
-                        "overlaps_multiple_blocks": overlap_counts[int(record_index)] > 1,
-                    }
+                analysis_workers = min(workers, len(block_tasks))
+                evaluated_blocks = executor.map(
+                    evaluate_block,
+                    block_tasks,
+                    chunksize=max(1, len(block_tasks) // (workers * 4)),
                 )
-                for evidence in result["evidence"]:
-                    cluster_evaluations += 1
-                    probability_bins[fraction_bin(evidence["sv_probability"])] += 1
-                    call_rate_bins[fraction_bin(evidence["call_rate"])] += 1
-                    if evidence["is_associated"]:
+            except (NotImplementedError, PermissionError) as error:
+                log.warning("Process workers unavailable (%s); evaluating blocks sequentially", error)
+                executor = None
+                analysis_workers = 1
+                evaluated_blocks = map(evaluate_block, block_tasks)
+        else:
+            executor = None
+            analysis_workers = 1
+            evaluated_blocks = map(evaluate_block, block_tasks)
+
+        try:
+            for prepared_block, evaluated_pairs in zip(prepared_blocks, evaluated_blocks):
+                block = prepared_block.membership
+                for record_index, result in evaluated_pairs:
+                    record = records[record_index]
+                    sv_block_pairs += 1
+                    association_counts[result["association_class"]] += 1
+                    if result["callable_samples"] == 0:
+                        no_callable_pairs += 1
+                    elif result["converged"]:
+                        converged_models += 1
+                    else:
+                        nonconverged_models += 1
+                    common = dict(zip(METADATA_COLUMNS, record.metadata))
+                    common.update(
+                        {
+                            "haploblock_id": block.haploblock_id,
+                            "block_start": block.start,
+                            "block_end": block.end,
+                            "overlaps_multiple_blocks": overlap_counts[record_index] > 1,
+                        }
+                    )
+                    cluster_evaluations += result["clusters_evaluated"]
+                    probability_bin_counts += result["probability_bins"]
+                    call_rate_bin_counts += result["call_rate_bins"]
+                    for evidence in result["evidence"]:
                         associated_cluster_rows += 1
                         low_evidence_associations += evidence["evidence_tier"] == "low"
                         downstream_writer.writerow(
@@ -811,22 +906,24 @@ def write_results(
                                 "model_iterations": result["iterations"],
                             }
                         )
-                for assignment in result["assignments"]:
-                    assignment_status_counts[assignment["assignment_status"]] += 1
-                    assignment_confidence_bins[fraction_bin(assignment["assignment_confidence"])] += 1
-                summary_writer.writerow(
-                    {
-                        **common,
-                        "callable_samples": result["callable_samples"],
-                        "heterozygous_samples": result["heterozygous_samples"],
-                        "clusters_evaluated": len(result["evidence"]),
-                        "associated_clusters": len(result["associated_ids"]),
-                        "associated_cluster_ids": ",".join(result["associated_ids"]),
-                        "association_class": result["association_class"],
-                        "model_converged": result["converged"],
-                        "model_iterations": result["iterations"],
-                    }
-                )
+                    assignment_status_counts += result["assignment_counts"]
+                    assignment_confidence_bin_counts += result["assignment_confidence_bins"]
+                    summary_writer.writerow(
+                        {
+                            **common,
+                            "callable_samples": result["callable_samples"],
+                            "heterozygous_samples": result["heterozygous_samples"],
+                            "clusters_evaluated": result["clusters_evaluated"],
+                            "associated_clusters": len(result["associated_ids"]),
+                            "associated_cluster_ids": ",".join(result["associated_ids"]),
+                            "association_class": result["association_class"],
+                            "model_converged": result["converged"],
+                            "model_iterations": result["iterations"],
+                        }
+                    )
+        finally:
+            if executor is not None:
+                executor.shutdown()
 
     analyzable_pairs = sv_block_pairs - no_callable_pairs
     qc = {
@@ -849,36 +946,37 @@ def write_results(
         "cluster_evaluations": cluster_evaluations,
         "associated_cluster_rows": associated_cluster_rows,
         "low_evidence_associations": low_evidence_associations,
-        "cluster_probability_bins": dict(probability_bins),
-        "cluster_call_rate_bins": dict(call_rate_bins),
-        "heterozygote_assignment_status_counts": dict(assignment_status_counts),
-        "heterozygote_assignment_confidence_bins": dict(assignment_confidence_bins),
+        "cluster_probability_bins": {
+            name: int(count)
+            for name, count in zip(FRACTION_BIN_NAMES, probability_bin_counts)
+            if count
+        },
+        "cluster_call_rate_bins": {
+            name: int(count)
+            for name, count in zip(FRACTION_BIN_NAMES, call_rate_bin_counts)
+            if count
+        },
+        "heterozygote_assignment_status_counts": {
+            name: int(count)
+            for name, count in zip(["same_cluster", "assigned", "ambiguous"], assignment_status_counts)
+            if count
+        },
+        "heterozygote_assignment_confidence_bins": {
+            name: int(count)
+            for name, count in zip(FRACTION_BIN_NAMES, assignment_confidence_bin_counts)
+            if count
+        },
         "association_class_counts": dict(association_counts),
         "multiple_cluster_fraction": association_counts["multiple"] / analyzable_pairs if analyzable_pairs else None,
         "association_threshold": association_threshold,
         "posterior_assignment_threshold": posterior_threshold,
         "max_iterations": max_iterations,
         "tolerance": tolerance,
-        "downloaded_intermediates_removed_after_success": True,
+        "cluster_cache_retained": download_qc["source"] == "download",
+        "analysis_workers": analysis_workers,
     }
     (qc_dir / f"method_qc.{chrom}.json").write_text(json.dumps(qc, indent=2) + "\n")
     log.info("Evaluated %d SV-block pairs across %d cluster files", sv_block_pairs, len(blocks))
-
-
-def remove_downloaded_intermediates(
-    cluster_paths: list[Path],
-    cluster_cache_dir: Path,
-    download_qc: dict,
-) -> None:
-    if download_qc["source"] != "download":
-        return
-    for path in cluster_paths:
-        path.unlink(missing_ok=True)
-    for directory in (cluster_cache_dir, cluster_cache_dir.parent, cluster_cache_dir.parent.parent):
-        try:
-            directory.rmdir()
-        except OSError:
-            pass
 
 
 def process_chromosome(
@@ -887,7 +985,7 @@ def process_chromosome(
     out_dir: Path,
     cluster_base_url: str,
     cluster_root: Path | None,
-    download_workers: int,
+    workers: int,
     retries: int,
     association_threshold: float,
     posterior_threshold: float,
@@ -898,13 +996,13 @@ def process_chromosome(
     if cluster_root is not None:
         per_chrom_dir = cluster_root / chrom
         cluster_dir = per_chrom_dir if per_chrom_dir.exists() else cluster_root
-    cluster_cache_dir = out_dir / "_intermediate" / "clusters" / chrom
+    cluster_cache_dir = cluster_cache_directory(out_dir, cluster_base_url, chrom)
     cluster_paths, download_qc = prepare_cluster_files(
         chrom,
         cluster_base_url,
         cluster_cache_dir,
         cluster_dir,
-        download_workers,
+        workers,
         retries,
     )
     write_results(
@@ -917,8 +1015,8 @@ def process_chromosome(
         max_iterations,
         tolerance,
         download_qc,
+        workers,
     )
-    remove_downloaded_intermediates(cluster_paths, cluster_cache_dir, download_qc)
 
 
 
@@ -942,6 +1040,8 @@ def chromosome_is_complete(
     chrom: str,
     vcf_path: Path,
     out_dir: Path,
+    cluster_base_url: str,
+    cluster_root: Path | None,
     max_sv_id_length: int,
     association_threshold: float,
     posterior_threshold: float,
@@ -963,9 +1063,23 @@ def chromosome_is_complete(
         return False
     vcf_qc = json.loads((qc_dir / f"vcf_qc.{chrom}.json").read_text())
     method_qc = json.loads((qc_dir / f"method_qc.{chrom}.json").read_text())
+    cluster_download = method_qc.get("cluster_download", {})
+    if cluster_root is None:
+        cluster_source_matches = (
+            cluster_download.get("source") == "download"
+            and cluster_download.get("base_url") == cluster_base_url.rstrip("/")
+        )
+    else:
+        per_chrom_dir = cluster_root / chrom
+        cluster_dir = per_chrom_dir if per_chrom_dir.exists() else cluster_root
+        cluster_source_matches = (
+            cluster_download.get("source") == "local"
+            and cluster_download.get("directory") == str(cluster_dir.resolve())
+        )
     return (
         vcf_qc.get("vcf") == str(vcf_path.resolve())
         and vcf_qc.get("sv_id_max_length") == max_sv_id_length
+        and cluster_source_matches
         and method_qc.get("association_threshold") == association_threshold
         and method_qc.get("posterior_assignment_threshold") == posterior_threshold
         and method_qc.get("max_iterations") == max_iterations
@@ -1004,6 +1118,8 @@ def run(args: argparse.Namespace) -> None:
             chrom,
             args.vcf,
             args.out_dir,
+            args.cluster_base_url,
+            args.cluster_root,
             args.max_sv_id_length,
             args.association_threshold,
             args.posterior_threshold,
@@ -1016,7 +1132,7 @@ def run(args: argparse.Namespace) -> None:
         log.info("Reusing completed outputs for: %s", ", ".join(completed_at_start))
 
     chrom_workers = min(args.threads, len(pending_chroms)) if pending_chroms else 1
-    download_workers = max(1, args.threads // chrom_workers)
+    workers_per_chromosome = max(1, args.threads // chrom_workers)
     sv_tables = {}
     if pending_chroms:
         sv_tables = reusable_sv_tables(
@@ -1028,28 +1144,36 @@ def run(args: argparse.Namespace) -> None:
             )
 
     if pending_chroms:
-        with ThreadPoolExecutor(max_workers=chrom_workers) as executor:
-            futures = {
-                executor.submit(
-                    process_chromosome,
-                    chrom,
-                    sv_tables[chrom],
-                    args.out_dir,
-                    args.cluster_base_url,
-                    args.cluster_root,
-                    download_workers,
-                    args.retries,
-                    args.association_threshold,
-                    args.posterior_threshold,
-                    args.max_iterations,
-                    args.tolerance,
-                ): chrom
-                for chrom in pending_chroms
-            }
-            for future in as_completed(futures):
-                chrom = futures[future]
-                future.result()
-                log.info("Completed %s", chrom)
+        chromosome_tasks = [
+            (
+                chrom,
+                sv_tables[chrom],
+                args.out_dir,
+                args.cluster_base_url,
+                args.cluster_root,
+                workers_per_chromosome,
+                args.retries,
+                args.association_threshold,
+                args.posterior_threshold,
+                args.max_iterations,
+                args.tolerance,
+            )
+            for chrom in pending_chroms
+        ]
+        if chrom_workers == 1:
+            for task in chromosome_tasks:
+                process_chromosome(*task)
+                log.info("Completed %s", task[0])
+        else:
+            with ThreadPoolExecutor(max_workers=chrom_workers) as executor:
+                futures = {
+                    executor.submit(process_chromosome, *task): task[0]
+                    for task in chromosome_tasks
+                }
+                for future in as_completed(futures):
+                    chrom = futures[future]
+                    future.result()
+                    log.info("Completed %s", chrom)
 
     qc_dir = args.out_dir / "debug_and_qc"
     completed_chroms = [
@@ -1062,7 +1186,8 @@ def run(args: argparse.Namespace) -> None:
             "requested_chromosomes": chroms,
             "threads": args.threads,
             "chromosome_workers": chrom_workers,
-            "download_workers_per_chromosome": download_workers,
+            "download_workers_per_chromosome": workers_per_chromosome,
+            "analysis_workers_per_chromosome": workers_per_chromosome,
         },
         "outputs": {
             chrom: {

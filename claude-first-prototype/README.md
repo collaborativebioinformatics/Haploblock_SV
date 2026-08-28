@@ -123,7 +123,7 @@ The default output directory is `claude-first-prototype/stage1_output/`. Chromos
 - `sv_block_summary.<chrom>.tsv`: one row per overlapping VCF record and haploblock, including association counts but never duplicating a pair by passing cluster. This is the counting input for Stage 5.
 - `sv_to_clusters.<chrom>.tsv`: one row per VCF record, haploblock, and cluster that passes the association threshold.
 
-All paths are registered in `stage1_output/config.yaml`. Population labels remain independent of cluster inference: pass the Stage 0 table with `--sample-metadata` to normalize and publish it for Stages 4, 6, and 7. Useful method diagnostics are kept under `debug_and_qc/`; downloaded cluster files remain temporary and are removed after a successful run.
+All paths are registered in `stage1_output/config.yaml`. Population labels remain independent of cluster inference: pass the Stage 0 table with `--sample-metadata` to normalize and publish it for Stages 4, 6, and 7. Useful method diagnostics are kept under `debug_and_qc/`. Downloaded cluster files are cached by source URL under `_intermediate/clusters/` so parameter changes and interrupted runs can reuse them without mixing sources. `--threads` is shared across chromosome-level work; for a single chromosome it also evaluates independent haploblocks in parallel.
 
 **Why we care:** Stage 1 creates the auditable allele-to-cluster mapping needed to ask whether the hash tags an SV, misses it within a cluster, or places the same resolved allele on several backgrounds.
 
@@ -207,11 +207,12 @@ The stage writes `sv_af_classification.tsv` with one row per SV and population, 
 
 ## Current Stage 5: per-haploblock SV-type enrichment
 
-`pipeline/stage5_type_enrichment.py` reads Stage 1's chromosome-specific `sv_block_summary` and `haploblocks` tables. It counts each unique SV–haploblock pair once, builds the complete haploblock-by-SV-type grid, and estimates each cell's expected count from block length and the overall rate for that SV type. Two-sided Poisson p-values are corrected together with Benjamini–Hochberg FDR.
+`pipeline/stage5_type_enrichment.py` reads Stage 1's chromosome-specific `sv_block_summary` and `haploblocks` tables. It counts each unique SV–haploblock pair once, builds the complete haploblock-by-SV-type grid, and estimates each cell's expected count from block length and the overall rate for that SV type. By default, each VCF record remains distinct. `--collapse-length-tolerance <bp>` optionally collapses records only when `chrom`, `start`, `end`, and SV type match exactly and their SV lengths differ by no more than the specified number of base pairs. Two-sided Poisson p-values are corrected together with Benjamini–Hochberg FDR.
 
 ```bash
 python claude-first-prototype/pipeline/stage5_type_enrichment.py \
-  --config claude-first-prototype/stage1_output/config.yaml
+  --config claude-first-prototype/stage1_output/config.yaml \
+  --collapse-length-tolerance 10
 ```
 
 The output `stage5_output/sv_type_enrichment.tsv` contains observed and expected counts, p- and q-values, and a configurable significance flag for every block/type combination. The accompanying config carries the Stage 1 paths forward and registers this output as `paths.sv_type_enrichment`.
@@ -329,6 +330,29 @@ rather than being collapsed into a single biological-importance score.
 python claude-first-prototype/pipeline/stage8_candidate_annotation.py \
   --config claude-first-prototype/stage7_output/config.yaml
 ```
+
+## Stage 9: report and biological interpretation
+
+`pipeline/stage9_report.py` reads the registered Stage 5-8 tables, writes a compact
+`report_facts.json`, creates summary figures, and produces Markdown and HTML reports.
+Only the compact facts are sent to the reporting agent; raw genotype and association
+tables remain local. To run it automatically after Stage 8 succeeds, provide Stage 5's
+separate branch config when launching Stage 8:
+
+```bash
+python claude-first-prototype/pipeline/stage8_candidate_annotation.py \
+  --config claude-first-prototype/stage7_output/config.yaml \
+  --out-dir claude-first-prototype/stage8_output \
+  --stage5-config claude-first-prototype/stage5_output/config.yaml \
+  --report-out-dir claude-first-prototype/stage9_output
+```
+
+With `OPENAI_API_KEY` set, the default `--agent auto` adds a plain-language biological
+interpretation through the OpenAI Responses API. Use `--agent required` for an
+unattended run that should fail if agent reporting is unavailable, or `--agent off`
+to generate only the deterministic report. In `auto` mode, API failures are recorded
+without discarding the deterministic report; `required` mode writes those artifacts
+and then fails the pipeline.
 
 ## Current testing status
 
