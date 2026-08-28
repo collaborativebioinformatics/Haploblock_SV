@@ -17,16 +17,9 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from stage4_classify_af import genotype_counts, resolve_path
+from stage4_classify_af import resolve_path
 from sv_contract import METADATA_COLUMNS
-
-
-COMMON_GT_DOSAGES = {
-    "0|0": 0.0, "0/0": 0.0, "0": 0.0,
-    "0|1": 1.0, "1|0": 1.0, "0/1": 1.0, "1/0": 1.0, "1": 1.0,
-    "1|1": 2.0, "1/1": 2.0,
-    ".": np.nan, ".|.": np.nan, "./.": np.nan,
-}
+from sv_dosage import dosage_matrix_from_genotypes, dosage_table
 
 
 def diplotype_table(memberships: pd.DataFrame) -> pd.DataFrame:
@@ -36,35 +29,6 @@ def diplotype_table(memberships: pd.DataFrame) -> pd.DataFrame:
         .agg(lambda clusters: "|".join(sorted(map(str, clusters))))
         .rename("diplotype")
         .reset_index()
-    )
-
-
-def dosage_matrix_from_genotypes(sv: pd.DataFrame, samples: list[str]) -> np.ndarray:
-    """Return variant-by-sample dosages, using a fast path for ordinary biallelic GTs."""
-    matrix = np.empty((len(sv), len(samples)), dtype=float)
-    for sample_index, sample in enumerate(samples):
-        genotype = sv[sample]
-        if pd.api.types.is_numeric_dtype(genotype):
-            matrix[:, sample_index] = pd.to_numeric(genotype, errors="coerce")
-            continue
-        mapped = genotype.map(COMMON_GT_DOSAGES)
-        unknown = mapped.isna() & genotype.notna() & ~genotype.isin((".", ".|.", "./."))
-        if unknown.any():
-            alternate, called = genotype_counts(genotype)
-            matrix[:, sample_index] = np.where(called > 0, alternate, np.nan)
-        else:
-            matrix[:, sample_index] = mapped.to_numpy(dtype=float, na_value=np.nan)
-    return matrix
-
-
-def dosage_table(sv: pd.DataFrame, samples: list[str]) -> pd.DataFrame:
-    """Convert genotype strings once and retain record metadata beside numeric dosages."""
-    return pd.concat(
-        [
-            sv[METADATA_COLUMNS].reset_index(drop=True),
-            pd.DataFrame(dosage_matrix_from_genotypes(sv, samples), columns=samples),
-        ],
-        axis=1,
     )
 
 

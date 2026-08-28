@@ -238,10 +238,17 @@ reported as carrier tags.
 **Why we care:** a cluster showing the same SV association across represented populations is a candidate portable tag, whereas an ancestry-only association is not.
 
 The current implementation uses a per-SV–block maximum-statistic permutation and reports positive
-carrier tags separately from negative exclusion signals. Pairs passing the screening permutation
-threshold receive an independent higher-resolution refinement run before pair-level FDR correction.
+carrier tags separately from negative exclusion signals. A small batched permutation run first
+triages every pair; pairs passing that threshold receive an independent screening run, and promising
+screening results receive a separate higher-resolution refinement before pair-level FDR correction.
+Pairs whose observed effect is below `--min-abs-r` remain in the output but do not advance to the
+costly screening or refinement stages. `permutations_used` records the size of the retained stage,
+not the cumulative computation across discarded stages.
 Population sign consistency remains an in-sample candidate screen rather than proof of portability;
 sequencing-batch constraints and leave-one-population-out validation remain future refinements.
+Genotypes are converted once per chromosome to a shared numeric dosage matrix, and Stage 6 reuses
+pre-indexed block memberships and cluster matrices. Variants with the same call mask are analyzed
+and permuted together using matrix operations rather than separate Python loops.
 
 Run Stage 6 with Stage 4's carried-forward config when population classifications should remain
 available to Stage 8:

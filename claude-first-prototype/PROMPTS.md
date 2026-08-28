@@ -140,8 +140,10 @@ SVs instead of treating any gene overlap as equivalent evidence.
 > desired FDR, and report positive carrier enrichment separately from negative cluster exclusion.
 > For candidate portable tags, emit per-population carrier rates/effects and leave-one-population-out
 > validation rather than defining portability from sign consistency in the discovery samples alone.
-> Use a modest maximum-statistic screening run for every SV–block pair, then discard its p-value and
-> run an independent high-resolution permutation set for promising pairs before pair-level FDR.
+> For genome-scale runs, use a small batched maximum-statistic triage set for every SV–block pair.
+> Retain its conservative p-value for pairs that do not advance; for promising pairs, discard it and
+> run an independent screening set, followed when warranted by an independent high-resolution
+> refinement before pair-level FDR. Record the size of the retained permutation stage.
 
 **Test:**
 > Use synthetic populations in which one cluster predicts an SV within both populations, plus an
