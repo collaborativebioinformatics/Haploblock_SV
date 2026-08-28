@@ -51,22 +51,21 @@ The same biological SV can be reported with slightly different breakpoints or re
 
 ### Outputs
 
+## Stage 0: cohort SV merging
+
+[`pipeline/stage_0_mergingvcf.py`](pipeline/stage_0_mergingvcf.py) accepts a
+manifest of local single-sample VCFs, validates sample names and contig
+compatibility, sorts and uniquely identifies each input, merges them with
+`bcftools merge -m id`, and reconciles equivalent representations with
+`truvari collapse`. See [`STAGE0_SUMMARY.md`](STAGE0_SUMMARY.md) for the command, 
+output contract, and options.
+
 | Output | Contents | Status |
 |---|---|---|
 | Merged cohort VCF | One cohort-level representation of comparable SV calls, with sample genotypes. | Planned; not implemented in this prototype. |
 
-### Output fields
-
-| Field | Meaning |
-|---|---|
-| Record ID | Unique identifier for one cohort-level SV record; it becomes the stable key used downstream. |
-| Coordinates, SV type, and length | The genomic location and the type and size of the event. |
-| Filter and imprecision status | Calling-quality context that later stages preserve rather than silently discard. |
-| Per-sample genotype | Evidence for which samples carry the SV. |
-
 ### Implementation notes
 
-The planned workflow merges single-sample long-read VCFs and reconciles equivalent calls with `truvari collapse`. Representation-level filtering and deduplication belong here. Later stages retain the records they receive and report their quality rather than silently removing SV types or `IMPRECISE` calls.
 
 ## Stage 1 — cluster-aware preprocessing
 

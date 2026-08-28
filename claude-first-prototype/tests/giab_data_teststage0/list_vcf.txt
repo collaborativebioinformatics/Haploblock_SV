@@ -1,0 +1,5 @@
+claude-first-prototype/tests/giab_data_teststage0/GRCh38_HG008-T-V0.5_somatic-stvar_ALL.draftbenchmark.vcf.gz
+claude-first-prototype/tests/giab_data_teststage0/HG008_T_N-P_HiFi_GRCh38-GIABv3_ClairS_v0.1.7_indel.vcf.gz
+
+# wget https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/data_somatic/HG008/Liss_lab/analysis/NIST_HG008-T_somatic-stvar-CNV_DraftBenchmark_V0.5-20260318/GRCh38_HG008-T-V0.5_somatic-stvar_ALL.draftbenchmark.vcf.gz
+# wget https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/data_somatic/HG008/Liss_lab/analysis/HKU_HiFi_ClairS_v0.1.7-SNV-INDEL_20240326/HG008_T_N-P_HiFi_GRCh38-GIABv3_ClairS_v0.1.7_indel.vcf.gz
